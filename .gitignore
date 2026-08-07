@@ -31,3 +31,6 @@ tsconfig.tsbuildinfo
 # moon
 .moon/cache
 .moon/docker
+
+# Local isolated development worktrees
+.worktrees/
