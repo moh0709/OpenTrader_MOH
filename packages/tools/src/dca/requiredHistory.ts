@@ -8,10 +8,11 @@ import { barSizeToDuration } from "../candlesticks/index.js";
 export function requiredHistory(
   indicatorsOptions: Array<[name: TIndicatorName, timeframe: BarSize, options: TIndicatorOptions<any>]>,
 ) {
-  return indicatorsOptions.reduce((acc, [, timeframe, options]) => {
+  return indicatorsOptions.reduce((acc, [name, timeframe, options]) => {
     const { periods } = options;
     const barSizeInMinutes = barSizeToDuration(timeframe) / 60000;
-    const requiredHistory = barSizeInMinutes * periods;
+    const requiredPeriods = name === "RSI" ? periods + 1 : periods;
+    const requiredHistory = barSizeInMinutes * requiredPeriods;
 
     if (requiredHistory > acc) {
       return requiredHistory;
