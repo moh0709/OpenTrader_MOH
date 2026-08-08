@@ -13,7 +13,7 @@ import {
 } from "@opentrader/bot-processor";
 
 export function* dca(ctx: TBotContext<DCABotConfig>) {
-  const { config, onStart, onStop } = ctx;
+  const { config, onStart, onStop, state } = ctx;
   const { settings } = config;
 
   if (onStop) {
@@ -30,6 +30,10 @@ export function* dca(ctx: TBotContext<DCABotConfig>) {
   }
 
   const indicators: IndicatorsValues = yield useIndicators(extractIndicators(settings.entry.conditions));
+  state.indicatorSnapshot = {
+    values: indicators,
+    updatedAt: Date.now(),
+  };
   const shouldEntry = evaluateConditions(settings.entry.conditions, indicators);
 
   if (shouldEntry) {
