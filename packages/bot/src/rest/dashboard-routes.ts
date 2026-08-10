@@ -1,0 +1,326 @@
+/**
+ * Plain REST surface for the dashboard, aimed at automation.
+ *
+ * The dashboard UI itself could use the tRPC router, but a tRPC URL carries a
+ * superjson envelope and a JSON-encoded query string, which is awkward for an
+ * external agent, a shell script or a workflow tool. These routes expose the
+ * same data as ordinary JSON so that driving OpenTrader from outside is a plain
+ * HTTP call.
+ *
+ * Both surfaces call the same builders in `services/dashboard-views`, so the
+ * numbers an agent reads are by construction the numbers on screen.
+ */
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { eventBus } from "@opentrader/event-bus";
+import { logger } from "@opentrader/logger";
+import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
+import {
+  BotService,
+  agentAccess,
+  buildEventsView,
+  buildGridView,
+  buildHealthView,
+  buildHistoryView,
+  buildPositionsView,
+  buildSnapshot,
+  buildTradesView,
+  dashboardService,
+  derive,
+} from "@opentrader/trpc";
+
+/** The dashboard runs as the single local user, matching the tRPC context. */
+const OWNER_ID = 1;
+
+const num = (value: unknown): number | undefined => {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+
+type AuthedRequest = FastifyRequest & { actor?: Actor };
+
+export async function dashboardRestRoutes(fastify: FastifyInstance) {
+  /** Authenticate every route in this plugin and apply the read rate limit. */
+  fastify.addHook("preHandler", async (request: AuthedRequest, reply: FastifyReply) => {
+    const actor = agentAccess.authenticate(
+      {
+        authorization: request.headers.authorization,
+        agentToken: request.headers["x-agent-token"] as string | undefined,
+      },
+      process.env.ADMIN_PASSWORD,
+    );
+
+    if (!actor) {
+      return reply.code(401).send({
+        error: "unauthorized",
+        message: "Provide the admin password in the Authorization header, or an agent token in X-Agent-Token.",
+      });
+    }
+
+    const limit = agentAccess.readLimiter.check(actor.name);
+    if (!limit.allowed) {
+      return reply
+        .code(429)
+        .header("retry-after", Math.ceil(limit.retryAfterMs / 1000))
+        .send({ error: "rate_limited", retryAfterMs: limit.retryAfterMs });
+    }
+
+    request.actor = actor;
+  });
+
+  const derived = () => dashboardService.getContext(OWNER_ID).then(derive);
+
+  /**
+   * Self-describing catalogue.
+   *
+   * An agent can read this to discover what it may call and with which
+   * arguments, rather than having the contract hard-coded against it.
+   */
+  fastify.get("/manifest", async (request: AuthedRequest) => ({
+    name: "opentrader-dashboard",
+    version: 1,
+    description: "Read trading analytics and control bots on this OpenTrader instance.",
+    authentication: {
+      header: "X-Agent-Token",
+      fallback: "Authorization (admin password)",
+      yourScope: request.actor?.scope ?? null,
+      yourName: request.actor?.name ?? null,
+    },
+    controlEnabled: !agentAccess.isFrozen(),
+    queries: [
+      { path: "GET /api/dash/snapshot", params: { metric: "netPnl|pnlPercent|trades|winRate|averagePnl|pnlPerHour", recentTradeLimit: "number" }, description: "Fleet overview, per-bot stats and leaderboard." },
+      { path: "GET /api/dash/health", params: {}, description: "Health checks with an ok/warn/crit rollup." },
+      { path: "GET /api/dash/trades", params: { botId: "number", symbol: "string", outcome: "win|loss|breakeven", from: "epoch ms", to: "epoch ms", sort: "exitAt|netPnl|pnlPercent|holdMs", direction: "asc|desc", limit: "1-500", offset: "number" }, description: "Closed round trips with realised profit." },
+      { path: "GET /api/dash/positions", params: { botId: "number", state: "live|abandoned|missing", includePending: "boolean" }, description: "Open positions, abandoned positions and resting entry orders." },
+      { path: "GET /api/dash/grid", params: { botId: "number" }, description: "Grid ladder state per level." },
+      { path: "GET /api/dash/history", params: { botId: "number", bucket: "5m|15m|1h|4h|1d", from: "epoch ms", to: "epoch ms" }, description: "Equity curve and distributions." },
+      { path: "GET /api/dash/events", params: { since: "epoch ms cursor, 0 to initialise", limit: "1-200" }, description: "Events since a cursor. Pass 0 first to get a cursor without replaying history." },
+      { path: "GET /api/dash/logs", params: { botId: "number", limit: "1-200" }, description: "Recent bot log entries." },
+      { path: "GET /api/dash/actions/log", params: { since: "epoch ms" }, description: "Audit trail of control actions." },
+    ],
+    actions: [
+      { path: "POST /api/dash/actions/bot.start", body: { botId: "number" }, scope: "control", description: "Start a bot." },
+      { path: "POST /api/dash/actions/bot.stop", body: { botId: "number" }, scope: "control", description: "Stop a bot. Resting exit orders are cancelled, which strands any open position." },
+      { path: "POST /api/dash/actions/bot.restart", body: { botId: "number" }, scope: "control", description: "Stop then start a bot." },
+      { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
+    ],
+  }));
+
+  fastify.get("/snapshot", async (request) => {
+    const query = request.query as Record<string, unknown>;
+
+    return buildSnapshot(await derived(), {
+      metric: str(query.metric) as LeaderboardMetric | undefined,
+      recentTradeLimit: num(query.recentTradeLimit),
+    });
+  });
+
+  fastify.get("/trades", async (request) => {
+    const query = request.query as Record<string, unknown>;
+
+    return buildTradesView(await derived(), {
+      botId: num(query.botId),
+      symbol: str(query.symbol),
+      outcome: str(query.outcome) as "win" | "loss" | "breakeven" | undefined,
+      from: num(query.from),
+      to: num(query.to),
+      sort: str(query.sort) as "exitAt" | "netPnl" | "pnlPercent" | "holdMs" | undefined,
+      direction: str(query.direction) as "asc" | "desc" | undefined,
+      limit: num(query.limit),
+      offset: num(query.offset),
+    });
+  });
+
+  fastify.get("/positions", async (request) => {
+    const query = request.query as Record<string, unknown>;
+
+    return buildPositionsView(await derived(), {
+      botId: num(query.botId),
+      state: str(query.state) as "live" | "abandoned" | "missing" | undefined,
+      includePending: query.includePending === undefined ? undefined : query.includePending !== "false",
+    });
+  });
+
+  fastify.get("/grid", async (request) => buildGridView(await derived(), num((request.query as Record<string, unknown>).botId)));
+
+  fastify.get("/history", async (request) => {
+    const query = request.query as Record<string, unknown>;
+
+    return buildHistoryView(await derived(), {
+      botId: num(query.botId),
+      bucket: str(query.bucket) as BucketSize | undefined,
+      from: num(query.from),
+      to: num(query.to),
+    });
+  });
+
+  fastify.get("/events", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const since = num(query.since) ?? 0;
+
+    const [context, logs] = await Promise.all([
+      derived(),
+      dashboardService.recentBotLogs(OWNER_ID, 100, since > 0 ? since : undefined),
+    ]);
+
+    const view = buildEventsView(context, logs, since, num(query.limit) ?? 50);
+
+    // Control actions belong in the same feed, so an operator sees the agent act.
+    const actions: DashboardEvent[] = agentAccess.actions(since).map((entry: AgentActionRecord) => ({
+      id: `agent-${entry.at}-${entry.action}`,
+      type: "agentAction" as const,
+      at: entry.at,
+      botId: typeof entry.target.botId === "number" ? entry.target.botId : null,
+      botName: null,
+      symbol: null,
+      title: `Agent ${entry.outcome}: ${entry.action}`,
+      message: `${entry.actor} - ${entry.action}${entry.detail ? ` - ${entry.detail}` : ""}`,
+      severity: entry.outcome === "allowed" ? ("info" as const) : ("warning" as const),
+      pnl: null,
+      pnlPercent: null,
+      smartTradeId: null,
+    }));
+
+    return {
+      events: [...view.events, ...actions].sort((a, b) => a.at - b.at),
+      cursor: Math.max(view.cursor, ...actions.map((event) => event.at), since),
+    };
+  });
+
+  fastify.get("/logs", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const botId = num(query.botId);
+    const context = await dashboardService.getContext(OWNER_ID);
+    const logs = await dashboardService.recentBotLogs(OWNER_ID, num(query.limit) ?? 50);
+
+    return {
+      logs: logs
+        .filter((log: BotLogRow) => botId === undefined || log.botId === botId)
+        .map((log: BotLogRow) => ({
+          id: log.id,
+          botId: log.botId,
+          botName: context.botNames.get(log.botId) ?? `Bot ${log.botId}`,
+          action: log.action,
+          triggerEventType: log.triggerEventType,
+          error: log.error && log.error !== "undefined" && log.error !== "null" ? log.error : null,
+          createdAt: log.createdAt.getTime(),
+        })),
+    };
+  });
+
+  fastify.get("/health", async () => {
+    const startedAt = Date.now();
+    const [context, lastBotActivity] = await Promise.all([derived(), dashboardService.lastBotActivity(OWNER_ID)]);
+
+    return buildHealthView({
+      derived: context,
+      database: dashboardService.getDatabaseStats(),
+      databasePath: dashboardService.databaseFile(),
+      process: dashboardService.processStats(),
+      host: dashboardService.hostStats(),
+      lastBotActivity,
+      paperFillPatchApplied: dashboardService.hasPaperFillFix(),
+      apiLatencyMs: Date.now() - startedAt,
+    });
+  });
+
+  fastify.get("/actions/log", async (request) => ({
+    frozen: agentAccess.isFrozen(),
+    tokens: agentAccess.describeTokens(),
+    actions: agentAccess.actions(num((request.query as Record<string, unknown>).since) ?? 0),
+  }));
+
+  // --- Control -------------------------------------------------------------
+
+  /** Shared guard: scope, freeze switch, rate limit and audit for one action. */
+  async function control(
+    request: AuthedRequest,
+    reply: FastifyReply,
+    action: string,
+    run: (botId: number) => Promise<void>,
+  ) {
+    const actor = request.actor!;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const botId = num(body.botId);
+
+    const deny = (code: number, error: string, detail: string) => {
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId: botId ?? null }, outcome: "denied", detail });
+
+      return reply.code(code).send({ error, message: detail });
+    };
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return deny(403, "forbidden", permission.reason!);
+    if (botId === undefined) return deny(400, "bad_request", "botId is required");
+
+    const limit = agentAccess.controlLimiter.check(actor.name);
+    if (!limit.allowed) return deny(429, "rate_limited", `Control rate limit reached, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s`);
+
+    try {
+      await run(botId);
+      // The cached context predates this change, so the next read must re-query.
+      dashboardService.invalidate();
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "allowed", detail: null });
+      logger.info(`[Dashboard] ${actor.kind} "${actor.name}" performed ${action} on bot ${botId}`);
+
+      return { ok: true, action, botId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "failed", detail: message });
+
+      return reply.code(409).send({ error: "action_failed", message });
+    }
+  }
+
+  fastify.post("/actions/bot.start", async (request: AuthedRequest, reply) =>
+    control(request, reply, "bot.start", async (botId) => {
+      const botService = await BotService.fromId(botId);
+      botService.assertIsNotAlreadyRunning();
+      botService.assertIsNotProcessing();
+      await eventBus.emit("startBot", botService.bot);
+    }),
+  );
+
+  fastify.post("/actions/bot.stop", async (request: AuthedRequest, reply) =>
+    control(request, reply, "bot.stop", async (botId) => {
+      const botService = await BotService.fromId(botId);
+      botService.assertIsNotAlreadyStopped();
+      await eventBus.emit("stopBot", botService.bot);
+    }),
+  );
+
+  fastify.post("/actions/bot.restart", async (request: AuthedRequest, reply) =>
+    control(request, reply, "bot.restart", async (botId) => {
+      const botService = await BotService.fromId(botId);
+
+      if (botService.bot.enabled) {
+        await eventBus.emit("stopBot", botService.bot);
+        // Re-read, so the start sees the state the stop just wrote.
+        const stopped = await BotService.fromId(botId);
+        await eventBus.emit("startBot", stopped.bot);
+      } else {
+        await eventBus.emit("startBot", botService.bot);
+      }
+    }),
+  );
+
+  /** The emergency switch. Admin only - an agent cannot unfreeze itself. */
+  fastify.post("/actions/freeze", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    if (actor.kind !== "admin") {
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "freeze", target: {}, outcome: "denied", detail: "Admin only" });
+
+      return reply.code(403).send({ error: "forbidden", message: "Only the admin password may change the freeze switch." });
+    }
+
+    const frozen = (request.body as { frozen?: unknown } | undefined)?.frozen !== false;
+    agentAccess.setFrozen(frozen);
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "freeze", target: { frozen }, outcome: "allowed", detail: null });
+
+    return { ok: true, frozen };
+  });
+}

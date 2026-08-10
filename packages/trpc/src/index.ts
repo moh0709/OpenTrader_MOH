@@ -18,3 +18,8 @@
 export { trpc } from "./trpc.js";
 export { type AppRouter, appRouter } from "./routers/appRouter.js";
 export { createContext, type Context } from "./utils/context.js";
+export { BotService } from "./services/bot.service.js";
+export { dashboardService, type BotLogRow } from "./services/dashboard.service.js";
+export * from "./services/dashboard-views.js";
+export { agentAccess, type Actor, type AgentScope, type AgentActionRecord } from "./services/agent-access.js";
+export type { BucketSize, DashboardEvent, LeaderboardMetric } from "./services/analytics/index.js";

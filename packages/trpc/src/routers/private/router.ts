@@ -7,3 +7,4 @@ export * from "./grid-bot/router.js";
 export * from "./smart-trade/router.js";
 export * from "./order/router.js";
 export * from "./exchange/router.js";
+export * from "./dashboard/router.js";

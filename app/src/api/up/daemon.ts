@@ -6,6 +6,7 @@ const { host, port } = getSettings();
 const app = await App.create({
   server: {
     frontendDistPath: "../frontend",
+    dashboardUiPath: "../dashboard-ui",
     host,
     port,
   },
