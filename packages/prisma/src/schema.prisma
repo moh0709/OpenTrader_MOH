@@ -146,6 +146,9 @@ model SmartTrade {
   bot   Bot? @relation(fields: [botId], references: [id], onDelete: Cascade)
   botId Int?
 
+  @@index([botId])
+  @@index([ref])
+
   owner   User @relation(fields: [ownerId], references: [id])
   ownerId Int
 
@@ -173,6 +176,10 @@ model Order {
   quantity     Float
   smartTrade   SmartTrade @relation(fields: [smartTradeId], references: [id], onDelete: Cascade)
   smartTradeId Int
+
+  // Every read of a trade fetches its orders; without this it is a table scan.
+  @@index([smartTradeId])
+  @@index([status, entityType])
 
   createdAt DateTime  @default(now())
   placedAt  DateTime?
@@ -235,6 +242,11 @@ model BotLog {
   createdAt        DateTime @default(now())
   bot              Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
   botId            Int
+
+  // This table grows fastest and is queried by bot and by recency. Without an
+  // index both are full scans of a table that reached 729 MB on one install.
+  @@index([botId, createdAt])
+  @@index([createdAt])
 }
 
 model Markets {

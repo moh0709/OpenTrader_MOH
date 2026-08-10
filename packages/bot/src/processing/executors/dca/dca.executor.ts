@@ -6,6 +6,7 @@ import { ITicker, XEntityType, XOrderStatus, XOrderType } from "@opentrader/type
 
 import { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-executor.interface.js";
 import { OrderExecutor } from "../order/order.executor.js";
+import { canClearRef, shouldCancelOnStop } from "../stop-policy.js";
 
 export class DcaExecutor implements ISmartTradeExecutor {
   smartTrade: SmartTradeWithOrders;
@@ -301,7 +302,16 @@ export class DcaExecutor implements ISmartTradeExecutor {
   async cancelOrders(): Promise<number> {
     const allOrders = [];
 
+    // Exits protecting a held position are left working: cancelling them would
+    // strand the position with no way to close. See ../stop-policy.ts.
+    const kept = [];
+
     for (const order of this.smartTrade.orders) {
+      if (!shouldCancelOnStop(order, this.smartTrade.orders)) {
+        kept.push(order.id);
+        continue;
+      }
+
       const exchangeAccount = await xprisma.exchangeAccount.findUniqueOrThrow({
         where: { id: order.exchangeAccountId },
       });
@@ -313,12 +323,14 @@ export class DcaExecutor implements ISmartTradeExecutor {
       allOrders.push(cancelled);
     }
 
-    await xprisma.smartTrade.clearRef(this.smartTrade.id);
+    // A bot re-adopts its trades by ref, so a held position must keep it.
+    if (canClearRef(this.smartTrade.orders)) await xprisma.smartTrade.clearRef(this.smartTrade.id);
     await this.pull();
 
     const cancelledOrders = allOrders.filter((cancelled) => cancelled);
     logger.info(
-      `[DcaExecutor] Orders were canceled: Position { id: ${this.smartTrade.id} }. Cancelled ${cancelledOrders.length} of ${allOrders.length} orders.`,
+      `[DcaExecutor] Orders were canceled: Position { id: ${this.smartTrade.id} }. Cancelled ${cancelledOrders.length} of ${allOrders.length} orders.` +
+        (kept.length > 0 ? ` Kept ${kept.length} exit order(s) working: the position is still held.` : ""),
     );
 
     return cancelledOrders.length;

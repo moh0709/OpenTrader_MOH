@@ -19,3 +19,10 @@ export * from "./channels/index.js";
 export { CCXTCandlesProvider } from "./market-data/ccxt-candles.provider.js";
 export { Platform } from "./platform.js";
 export { App } from "./app.js";
+export {
+  findStrandedPositions,
+  recoverPosition,
+  recoverPositions,
+  type RecoverablePosition,
+  type RecoveryResult,
+} from "./processing/executors/recover-position.js";

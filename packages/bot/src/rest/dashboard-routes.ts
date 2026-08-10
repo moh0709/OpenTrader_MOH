@@ -12,6 +12,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eventBus } from "@opentrader/event-bus";
+import { findStrandedPositions, recoverPositions } from "../processing/executors/recover-position.js";
 import { logger } from "@opentrader/logger";
 import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
 import {
@@ -100,11 +101,13 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/events", params: { since: "epoch ms cursor, 0 to initialise", limit: "1-200" }, description: "Events since a cursor. Pass 0 first to get a cursor without replaying history." },
       { path: "GET /api/dash/logs", params: { botId: "number", limit: "1-200" }, description: "Recent bot log entries." },
       { path: "GET /api/dash/actions/log", params: { since: "epoch ms" }, description: "Audit trail of control actions." },
+      { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
     ],
     actions: [
       { path: "POST /api/dash/actions/bot.start", body: { botId: "number" }, scope: "control", description: "Start a bot." },
       { path: "POST /api/dash/actions/bot.stop", body: { botId: "number" }, scope: "control", description: "Stop a bot. Resting exit orders are cancelled, which strands any open position." },
       { path: "POST /api/dash/actions/bot.restart", body: { botId: "number" }, scope: "control", description: "Stop then start a bot." },
+      { path: "POST /api/dash/actions/position.recoverStranded", body: { botId: "number, optional", limit: "1-200, default 25" }, scope: "control", description: "Place replacement exit orders for stranded positions at their original target prices. Check GET /positions/stranded first." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -227,6 +230,26 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     });
   });
 
+  /**
+   * Everything recovery would act on, and what it would place. Read-only, so it
+   * needs no control scope: seeing the damage should never require permission to
+   * change anything.
+   */
+  fastify.get("/positions/stranded", async (request) => {
+    const botId = num((request.query as Record<string, unknown>).botId);
+    const positions = await findStrandedPositions(OWNER_ID, botId);
+    const recoverable = positions.filter((p) => p.blockedReason === null);
+
+    return {
+      total: positions.length,
+      recoverable: recoverable.length,
+      blocked: positions.length - recoverable.length,
+      expectedPnl: recoverable.reduce((sum, p) => sum + (p.expectedPnl ?? 0), 0),
+      capital: positions.reduce((sum, p) => sum + p.entryPrice * p.quantity, 0),
+      positions,
+    };
+  });
+
   fastify.get("/actions/log", async (request) => ({
     frozen: agentAccess.isFrozen(),
     tokens: agentAccess.describeTokens(),
@@ -306,6 +329,45 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       }
     }),
   );
+
+  /**
+   * Place replacement exits for stranded positions.
+   *
+   * `limit` bounds one invocation so this can be done in reviewable batches
+   * rather than as one irreversible sweep.
+   */
+  fastify.post("/actions/position.recoverStranded", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const limit = Math.min(num(body.limit) ?? 25, 200);
+    const botId = num(body.botId);
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) {
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "position.recoverStranded", target: { botId: botId ?? null }, outcome: "denied", detail: permission.reason });
+
+      return reply.code(403).send({ error: "forbidden", message: permission.reason });
+    }
+
+    const rate = agentAccess.controlLimiter.check(actor.name);
+    if (!rate.allowed) {
+      return reply.code(429).send({ error: "rate_limited", retryAfterMs: rate.retryAfterMs });
+    }
+
+    const result = await recoverPositions(OWNER_ID, { botId, limit });
+    dashboardService.invalidate();
+
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "position.recoverStranded",
+      target: { botId: botId ?? null, limit },
+      outcome: result.failed > 0 && result.placed === 0 ? "failed" : "allowed",
+      detail: `placed ${result.placed}, failed ${result.failed}`,
+    });
+
+    return result;
+  });
 
   /** The emergency switch. Admin only - an agent cannot unfreeze itself. */
   fastify.post("/actions/freeze", async (request: AuthedRequest, reply) => {

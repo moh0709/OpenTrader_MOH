@@ -16,12 +16,16 @@
  * Repository URL: https://github.com/bludnic/opentrader
  */
 import { logger } from "@opentrader/logger";
+import { retentionDays, xprisma } from "@opentrader/db";
 import { createServer, CreateServerOptions } from "./server.js";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 
 type AppParams = {
   server: CreateServerOptions;
 };
+
+/** How often bot logs are pruned. Slow: the window is measured in days. */
+const LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export class App {
   /**
@@ -30,10 +34,43 @@ export class App {
    * @param platform - The platform instance used by the class.
    * @param server - The server instance created by the `createServer` function.
    */
+  private logPruneTimer: NodeJS.Timeout | null = null;
+
   constructor(
     private platform: Platform,
     private server: ReturnType<typeof createServer>,
-  ) {}
+  ) {
+    this.startLogPruning();
+  }
+
+  /**
+   * Periodically drop bot logs past the retention window.
+   *
+   * The table is append-only and grows for as long as the daemon runs, so
+   * without this it only ever gets bigger. Runs off the trading path, and is
+   * disabled by setting BOT_LOG_RETENTION_DAYS to 0.
+   */
+  private startLogPruning() {
+    const days = retentionDays();
+    if (days <= 0) {
+      logger.info("Bot log pruning is disabled (BOT_LOG_RETENTION_DAYS=0)");
+      return;
+    }
+
+    const prune = async () => {
+      try {
+        const deleted = await xprisma.botLog.prune();
+        if (deleted > 0) logger.info(`Pruned ${deleted} bot log entries older than ${days} days`);
+      } catch (err) {
+        logger.warn(`Could not prune bot logs: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    void prune();
+    this.logPruneTimer = setInterval(() => void prune(), LOG_PRUNE_INTERVAL_MS);
+    // Never hold the process open just for housekeeping.
+    this.logPruneTimer.unref?.();
+  }
 
   /**
    * Creates a new Daemon instance.
@@ -67,6 +104,11 @@ export class App {
    */
   async shutdown() {
     logger.info("Shutting down Platform...");
+
+    if (this.logPruneTimer) {
+      clearInterval(this.logPruneTimer);
+      this.logPruneTimer = null;
+    }
 
     await this.server.close();
     logger.info("Fastify Server has shut down gracefully.");
