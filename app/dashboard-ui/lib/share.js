@@ -242,20 +242,46 @@ async function ownerApi(path, options = {}) {
   return payload;
 }
 
+/**
+ * A link with a copy button.
+ *
+ * Email delivery depends on a relay this code cannot vouch for, so the link is
+ * always presented as something you can take by hand. The field is read-only
+ * and selects itself on focus, so it also works where the clipboard API does
+ * not - an insecure origin, or a browser that refuses the permission.
+ */
+function copyField(url) {
+  const input = el("input", { class: "input", type: "text", readonly: true, value: url, "aria-label": "Share link" });
+  input.addEventListener("focus", () => input.select());
+  input.addEventListener("click", () => input.select());
+
+  const button = el("button", {
+    class: "btn",
+    type: "button",
+    text: "Copy",
+    onclick: async () => {
+      input.select();
+
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        // Older browsers and insecure origins: the selection above lets the
+        // reader copy manually, and this usually still works.
+        document.execCommand?.("copy");
+      }
+
+      button.textContent = "Copied";
+      window.setTimeout(() => (button.textContent = "Copy"), 1500);
+    },
+  });
+
+  return el("div", { class: "field__row", style: { marginTop: "6px", alignItems: "stretch" } }, [input, button]);
+}
+
 const STATUS_LABEL = { active: "In use", unclaimed: "Not opened yet", expired: "Expired", revoked: "Revoked" };
 
 function shareRow(share, refresh) {
   const actions = el("div", { class: "field__row", style: { marginTop: "6px" } }, [
-    el("button", {
-      class: "btn btn--sm",
-      type: "button",
-      text: "Copy link",
-      onclick: async (event) => {
-        await navigator.clipboard?.writeText(share.url).catch(() => undefined);
-        event.target.textContent = "Copied";
-        window.setTimeout(() => (event.target.textContent = "Copy link"), 1500);
-      },
-    }),
     share.status === "active"
       ? el("button", {
           class: "btn btn--sm",
@@ -307,6 +333,8 @@ function shareRow(share, refresh) {
 
 /** The Share drawer: issue a link, and manage the ones already out there. */
 export function renderShareManager(body) {
+  /** The link just issued, shown at the top until the drawer is reopened. */
+  let created = null;
   const refresh = () => void load();
 
   const load = async () => {
@@ -336,7 +364,7 @@ export function renderShareManager(body) {
         submit.textContent = "Creating…";
 
         try {
-          await ownerApi("/shares", {
+          const share = await ownerApi("/shares", {
             method: "POST",
             body: JSON.stringify({
               name: name.value,
@@ -345,6 +373,8 @@ export function renderShareManager(body) {
               expiresAt: new Date(`${expiry.value}T23:59:59Z`).toISOString(),
             }),
           });
+
+          created = share;
           refresh();
         } catch (err) {
           error.textContent = err.message;
@@ -357,6 +387,20 @@ export function renderShareManager(body) {
 
     mount(
       body,
+      created
+        ? el("div", { class: "note", style: { marginBottom: "14px" } }, [
+            el("div", { style: { fontWeight: "600", marginBottom: "2px" } }, [
+              el("span", { text: `Link ready for ${created.name}` }),
+            ]),
+            el("div", {
+              class: "small",
+              text: created.emailError
+                ? `Email could not be delivered (${created.emailError}). Copy the link and send it yourself.`
+                : "Emailed, and here it is to copy as well.",
+            }),
+            copyField(created.url),
+          ])
+        : null,
       el("div", { class: "section-title", text: "Share the live feed" }),
       el("p", { class: "field__hint", style: { marginBottom: "12px" } }, [
         el("span", {
