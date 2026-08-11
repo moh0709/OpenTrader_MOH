@@ -12,10 +12,19 @@
     <div id="app" class="app" hidden>
       <header class="topbar">
         <div class="topbar__left">
-          <a class="brand" href="/" title="Back to OpenTrader">
+          <!-- The dashboard is a separate document, so there is no in-app route
+               back to the bot list. This is the way home on every screen size. -->
+          <a class="btn btn--back" href="/" title="Back to bots">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn__label">Bots</span>
+          </a>
+
+          <span class="brand">
             <span class="brand__mark" aria-hidden="true"></span>
             <span class="brand__text">Analytics</span>
-          </a>
+          </span>
 
           <button type="button" class="health-pill" data-health-pill aria-live="polite">
             <span class="health-pill__dot" aria-hidden="true"></span>
@@ -48,8 +57,8 @@
             </button>
           </div>
 
-          <button type="button" class="btn btn--primary" data-open-catalog>
-            <span aria-hidden="true">+</span> Add widget
+          <button type="button" class="btn btn--primary" data-open-catalog title="Add widget">
+            <span aria-hidden="true">+</span><span class="btn__label">Add widget</span>
           </button>
           <button type="button" class="btn btn--icon" data-open-settings title="Settings" aria-label="Settings">
             <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">

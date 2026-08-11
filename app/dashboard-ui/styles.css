@@ -145,6 +145,11 @@ button, input, select { font: inherit; color: inherit; }
 .topbar__right { margin-left: auto; }
 
 .brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text-primary); }
+
+/* Back to the bot list. Keeps its label on wide screens and collapses to the
+   chevron on narrow ones, where header space is the scarce thing. */
+.btn--back { text-decoration: none; padding-inline: 8px 10px; gap: 4px; flex: none; }
+.btn--back svg { flex: none; }
 .brand__mark {
   width: 20px; height: 20px; border-radius: 6px;
   background: linear-gradient(135deg, var(--series-1), var(--series-3));
@@ -494,9 +499,18 @@ button, input, select { font: inherit; color: inherit; }
 
 @media (max-width: 720px) {
   .widget { grid-column: 1 / -1; }
-  .topbar { flex-wrap: wrap; gap: 10px; }
+  .topbar { flex-wrap: wrap; gap: 8px 10px; padding: 8px 12px; }
   .topbar__right { width: 100%; }
   .grid { padding: var(--gap) 12px 60px; }
+
+  /* The chevron alone reads as "back"; the word costs room better spent on
+     the health pill and the refresh controls. */
+  .btn--back .btn__label { display: none; }
+  .btn--back { padding-inline: 7px; }
+  .brand__text { font-size: 13px; }
+  .refresh__status { min-width: 0; }
+  .btn--primary .btn__label { display: none; }
+  .btn--primary { padding-inline: 10px; font-size: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
