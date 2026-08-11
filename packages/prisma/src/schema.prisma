@@ -280,3 +280,33 @@ model PaperOrder {
   fee                Float    @default(0)
   createdAt          DateTime @default(now())
 }
+
+/// A read-only, single-device live view of the analytics, granted to one named
+/// person until a date the owner chooses. The token is derived from the
+/// recipient's email and name, so each person has exactly one link.
+model ShareLink {
+  id    Int    @id @default(autoincrement())
+  token String @unique
+
+  name  String
+  email String
+
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  /// The first device to open the link claims it. Anyone else is refused.
+  /// Cleared by the owner to let the recipient move to another device.
+  deviceId  String?
+  claimedAt DateTime?
+
+  /// Refreshed on every heartbeat; drives the presence indicator.
+  lastSeenAt DateTime?
+
+  emailSentAt DateTime?
+  emailError  String?
+
+  /// One link per recipient: the address and name are the identity.
+  @@unique([email, name])
+  @@index([lastSeenAt])
+}

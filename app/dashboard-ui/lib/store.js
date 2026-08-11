@@ -52,6 +52,8 @@ class Store {
     this.data = {
       snapshot: null,
       health: null,
+      /** Recipients currently watching a shared live feed. */
+      watchers: [],
       /** Per-widget slices keyed by widget instance id. */
       slices: new Map(),
     };

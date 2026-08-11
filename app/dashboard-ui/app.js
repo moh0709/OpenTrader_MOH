@@ -14,6 +14,7 @@ import { PRESETS, addWidget, applyHeightMode, applyPreset, initLayout, instanceC
 import { groupedCatalog } from "./widgets/index.js";
 import { el, mount } from "./lib/dom.js";
 import { money, timeAgo } from "./lib/format.js";
+import { fetchWatchers, renderShareManager, shareToken, startLiveFeed } from "./lib/share.js";
 
 const app = document.getElementById("app");
 const login = document.getElementById("login");
@@ -89,6 +90,7 @@ function bindChrome() {
   document.querySelector("[data-refresh-now]").addEventListener("click", () => void tick({ force: true }));
   document.querySelector("[data-toggle-theme]").addEventListener("click", toggleTheme);
   document.querySelector("[data-open-catalog]").addEventListener("click", () => openDrawer("catalog"));
+  document.querySelector("[data-open-share]")?.addEventListener("click", () => openDrawer("share"));
   document.querySelector("[data-open-settings]").addEventListener("click", () => openDrawer("settings"));
   document.querySelector("[data-health-pill]").addEventListener("click", () => addWidget("health"));
 
@@ -98,11 +100,15 @@ function bindChrome() {
   for (const node of document.querySelectorAll("[data-settings-close]")) {
     node.addEventListener("click", () => closeDrawer("settings"));
   }
+  for (const node of document.querySelectorAll("[data-share-close]")) {
+    node.addEventListener("click", () => closeDrawer("share"));
+  }
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeDrawer("catalog");
       closeDrawer("settings");
+      closeDrawer("share");
     }
   });
 }
@@ -111,6 +117,7 @@ function openDrawer(which) {
   const node = document.querySelector(`[data-${which}]`);
   if (which === "catalog") renderCatalog();
   if (which === "settings") renderSettings();
+  if (which === "share") renderShareManager(document.querySelector("[data-share-body]"));
   node.hidden = false;
 }
 
@@ -387,6 +394,18 @@ function start() {
   // Keep "updated Xs ago" honest between refreshes.
   window.setInterval(renderRefreshStatus, 1000);
 
+  // Who is watching a shared feed. Published to the store so the Overview
+  // widget can show it beside "N/N bots running".
+  const pollWatchers = async () => {
+    if (document.visibilityState !== "visible") return;
+
+    store.data.watchers = await fetchWatchers();
+    store.emit("watchers");
+  };
+
+  void pollWatchers();
+  window.setInterval(() => void pollWatchers(), 15_000);
+
   initPoller({
     onEvents: (events) => {
       for (const event of events) toastForEvent(event);
@@ -402,5 +421,10 @@ function start() {
   renderHeader();
 }
 
-if (getPassword()) start();
+// A share token means this page is a recipient's read-only feed, not the
+// dashboard: no admin password, no widgets, no presence list.
+const token = shareToken();
+
+if (token) startLiveFeed(token);
+else if (getPassword()) start();
 else showLogin();

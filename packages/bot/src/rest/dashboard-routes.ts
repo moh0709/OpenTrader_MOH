@@ -15,6 +15,15 @@ import { eventBus } from "@opentrader/event-bus";
 import { xprisma } from "@opentrader/db";
 import { findStrandedPositions, recoverPositions } from "../processing/executors/recover-position.js";
 import { previewPurge, purgeBotTrades, setBotLimits } from "../processing/executors/purge-bot.js";
+import {
+  createShare,
+  currentWatchers,
+  deleteShare,
+  listShares,
+  publicBaseUrl,
+  releaseDevice,
+  revokeShare,
+} from "../processing/share/share.service.js";
 import { logger } from "@opentrader/logger";
 import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
 import {
@@ -106,6 +115,8 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
       { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
       { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
+      { path: "GET /api/dash/shares", params: {}, description: "Share links, their status and who is watching." },
+      { path: "GET /api/dash/shares/watchers", params: {}, description: "Recipients watching a shared feed right now." },
     ],
     actions: [
       { path: "POST /api/dash/actions/bot.start", body: { botId: "number" }, scope: "control", description: "Start a bot." },
@@ -114,6 +125,9 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/actions/position.recoverStranded", body: { botId: "number, optional", limit: "1-200, default 25" }, scope: "control", description: "Place replacement exit orders for stranded positions at their original target prices. Check GET /positions/stranded first." },
       { path: "POST /api/dash/actions/bot.purgeTrades", body: { botId: "number" }, scope: "control", description: "Delete every trade of a bot, open and closed. Destructive and irreversible. Cancels live orders first and refuses while the bot is running. Check the purge-preview first." },
       { path: "POST /api/dash/actions/bot.setLimits", body: { botId: "number", maxCapital: "number, 0 clears", minProfit: "number, 0 clears" }, scope: "control", description: "Cap the capital a bot may commit at once, and the minimum profit a cycle must make before its exit is allowed to close." },
+      { path: "POST /api/dash/shares", body: { name: "string", email: "string", expiresAt: "ISO date" }, scope: "control", description: "Issue a read-only live-feed link for one person, on one device, until the expiry. Emails it and returns the URL." },
+      { path: "POST /api/dash/shares/:id/revoke | /release", body: {}, scope: "control", description: "Revoke a link, or free it from the device holding it." },
+      { path: "DELETE /api/dash/shares/:id", body: {}, scope: "control", description: "Delete a share link." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -277,6 +291,73 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (botId === undefined) return reply.code(400).send({ error: "bad_request", message: "botId is required" });
 
     return previewPurge(botId, OWNER_ID);
+  });
+
+  /** Who is watching a shared link right now. Drives the presence indicator. */
+  fastify.get("/shares/watchers", async () => ({ watchers: await currentWatchers() }));
+
+  fastify.get("/shares", async (request) => ({
+    shares: await listShares(publicBaseUrl(request.headers.host, request.protocol)),
+    /** Reported so the owner can see whether mail is even being attempted. */
+    emailEnabled: process.env.SHARE_EMAIL !== "off",
+  }));
+
+  fastify.post("/shares", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const result = await createShare(
+      (request.body ?? {}) as Record<string, unknown>,
+      publicBaseUrl(request.headers.host, request.protocol),
+    );
+
+    if (!result.ok) return reply.code(400).send({ error: "bad_request", message: result.error });
+
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "share.create",
+      target: { email: result.share.email },
+      outcome: "allowed",
+      detail: result.share.emailError ? `link created, email failed: ${result.share.emailError}` : "link created and emailed",
+    });
+
+    return result.share;
+  });
+
+  /** Revoke, delete, or free the link from the device holding it. */
+  for (const [path, action, run] of [
+    ["/shares/:id/revoke", "share.revoke", revokeShare],
+    ["/shares/:id/release", "share.release", releaseDevice],
+  ] as const) {
+    fastify.post(path, async (request: AuthedRequest, reply) => {
+      const actor = request.actor!;
+      const permission = agentAccess.canControl(actor);
+      if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+      const id = num((request.params as Record<string, unknown>).id);
+      if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
+      if (!(await run(id))) return reply.code(404).send({ error: "not_found", message: "Share link not found" });
+
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { id }, outcome: "allowed", detail: null });
+
+      return { ok: true };
+    });
+  }
+
+  fastify.delete("/shares/:id", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const id = num((request.params as Record<string, unknown>).id);
+    if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
+    if (!(await deleteShare(id))) return reply.code(404).send({ error: "not_found", message: "Share link not found" });
+
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "share.delete", target: { id }, outcome: "allowed", detail: null });
+
+    return { ok: true };
   });
 
   fastify.get("/actions/log", async (request) => ({

@@ -6,6 +6,7 @@ import fastifyStatic from "@fastify/static";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import { appRouter } from "@opentrader/trpc";
 import { dashboardRestRoutes } from "./rest/dashboard-routes.js";
+import { shareRoutes } from "./rest/share-routes.js";
 import { createContext } from "./trpc.js";
 
 // Path to the current file
@@ -65,6 +66,9 @@ export const createServer = (params: CreateServerOptions) => {
 
   // Plain JSON surface for automation, alongside the tRPC router the UI uses.
   fastify.register(dashboardRestRoutes, { prefix: "/api/dash" });
+
+  // The only surface reachable without the admin password: a share-token view.
+  fastify.register(shareRoutes, { prefix: "/api/share" });
 
   return {
     app: fastify,

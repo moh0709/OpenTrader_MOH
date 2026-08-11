@@ -315,6 +315,23 @@ button, input, select { font: inherit; color: inherit; }
 }
 .note--warn { border-left-color: var(--warning); }
 
+/* Presence: a live green LED beside the watcher's name. */
+.watcher {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 8px 1px 6px; margin-left: 6px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--text-secondary);
+  font-size: 11px; white-space: nowrap; vertical-align: middle;
+}
+.led {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--good);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 25%, transparent);
+  animation: led-pulse 2s ease-in-out infinite;
+}
+@keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.watchers { display: inline-flex; flex-wrap: wrap; gap: 2px; }
+
 .muted { color: var(--text-muted); }
 .small { font-size: 12px; }
 .nowrap { white-space: nowrap; }

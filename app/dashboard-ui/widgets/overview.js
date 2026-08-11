@@ -10,6 +10,7 @@ import { badge, el, emptyState, mount, note, select } from "../lib/dom.js";
 import { barChart, sparkline } from "../lib/charts.js";
 import { count, duration, money, percent, pnlClass, timeAgo } from "../lib/format.js";
 import { mutate } from "../lib/api.js";
+import { renderWatchers } from "../lib/share.js";
 import { toast } from "../lib/toast.js";
 import { tick } from "../lib/poller.js";
 
@@ -43,6 +44,25 @@ export const kpiWidget = {
   pinned: true,
 
   render(ctx) {
+    /**
+     * Anyone watching a shared feed, shown beside the bot count.
+     *
+     * Lives in the widget header rather than the body so it survives a redraw
+     * of the tiles and sits where you look for what is happening right now.
+     */
+    const drawWatchers = () => {
+      const head = ctx.body.parentElement?.querySelector(".widget__meta");
+      if (!head) return;
+
+      let slot = head.parentElement.querySelector(".watchers");
+      if (!slot) {
+        slot = el("span", { class: "watchers" });
+        head.after(slot);
+      }
+
+      renderWatchers(slot, ctx.store.data.watchers);
+    };
+
     const draw = () => {
       const snapshot = ctx.store.data.snapshot;
       if (!snapshot) return mount(ctx.body, emptyState("Loading…"));
@@ -52,6 +72,7 @@ export const kpiWidget = {
       const positions = fleet.positions;
 
       ctx.setMeta(`${count(fleet.enabledBots)}/${count(fleet.bots)} bots running`);
+      drawWatchers();
 
       mount(
         ctx.body,
@@ -96,7 +117,12 @@ export const kpiWidget = {
 
     draw();
 
-    return { dispose: ctx.store.subscribe((reason) => (reason === "snapshot" || reason === "settings") && draw()) };
+    return {
+      dispose: ctx.store.subscribe((reason) => {
+        if (reason === "snapshot" || reason === "settings") draw();
+        if (reason === "watchers") drawWatchers();
+      }),
+    };
   },
 };
 
