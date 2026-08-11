@@ -428,6 +428,11 @@ button, input, select { font: inherit; color: inherit; }
   display: flex; flex-direction: column; gap: 8px;
   max-width: min(360px, calc(100vw - 32px));
 }
+.toasts--alerts { top: 16px; bottom: auto; right: 16px; }
+.toast--sticky { border-color: var(--critical); box-shadow: 0 2px 20px rgba(208, 59, 59, 0.25), var(--shadow); }
+.toast--sticky .toast__title { color: var(--critical); }
+.toast__hint { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+
 .toast {
   display: grid; grid-template-columns: 3px 1fr auto; gap: 10px;
   padding: 10px 12px;

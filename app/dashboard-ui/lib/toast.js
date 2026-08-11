@@ -12,9 +12,11 @@ const MAX_VISIBLE = 5;
 const LIFETIME_MS = 8000;
 
 let container = null;
+let alertContainer = null;
 
-export function initToasts(node) {
+export function initToasts(node, alerts) {
   container = node;
+  alertContainer = alerts ?? null;
 }
 
 /** A short two-tone chime. Uses WebAudio, so there is no asset to load. */
@@ -44,14 +46,23 @@ function playChime(severity) {
   }
 }
 
-export function toast({ title, message, severity = "info", onClick = null, silent = false }) {
-  if (!container) return;
+/**
+ * Show a toast.
+ *
+ * `sticky` puts it in the top-right stack and leaves it there until dismissed:
+ * for something the owner must actually see and acknowledge, a message that
+ * fades after eight seconds is a message that gets missed.
+ */
+export function toast({ title, message, severity = "info", onClick = null, silent = false, sticky = false, hint = null }) {
+  const stack = sticky ? alertContainer : container;
+  if (!stack) return;
 
-  const node = el("div", { class: "toast", dataset: { severity }, role: "status" }, [
+  const node = el("div", { class: `toast${sticky ? " toast--sticky" : ""}`, dataset: { severity }, role: sticky ? "alert" : "status" }, [
     el("div", { class: "toast__bar" }),
     el("div", {}, [
       el("div", { class: "toast__title", text: title }),
       message ? el("div", { class: "toast__msg", text: message }) : null,
+      hint ? el("div", { class: "toast__hint", text: hint }) : null,
     ]),
     el("button", {
       class: "toast__close",
@@ -73,13 +84,16 @@ export function toast({ title, message, severity = "info", onClick = null, silen
     });
   }
 
-  container.append(node);
+  stack.append(node);
 
-  while (container.children.length > MAX_VISIBLE) dismiss(container.firstElementChild);
+  // Sticky alerts are never culled to make room: each one is a distinct event
+  // the owner has not acknowledged yet.
+  if (!sticky) {
+    while (stack.children.length > MAX_VISIBLE) dismiss(stack.firstElementChild);
+    setTimeout(() => dismiss(node), LIFETIME_MS);
+  }
 
   if (!silent && store.settings.toastSound) playChime(severity);
-
-  setTimeout(() => dismiss(node), LIFETIME_MS);
 }
 
 function dismiss(node) {

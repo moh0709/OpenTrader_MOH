@@ -231,10 +231,14 @@ export function startLiveFeed(token) {
 
 async function ownerApi(path, options = {}) {
   const password = window.localStorage.getItem("ADMIN_PASSWORD");
-  const response = await window.fetch(`/api/dash${path}`, {
-    headers: { authorization: password ?? "", "content-type": "application/json" },
-    ...options,
-  });
+
+  // Only declare a JSON body when there is one. Fastify rejects a request that
+  // announces application/json and then sends nothing, which is what broke
+  // delete, revoke and release - all three carry no body.
+  const headers = { authorization: password ?? "" };
+  if (options.body !== undefined) headers["content-type"] = "application/json";
+
+  const response = await window.fetch(`/api/dash${path}`, { headers, ...options });
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw new Error(payload?.message || `HTTP ${response.status}`);
@@ -452,12 +456,26 @@ export function renderWatchers(container, watchers) {
   );
 }
 
+/** Cursor for refused attempts, so a reload does not replay old alerts. */
+let blockedCursor = Number(window.localStorage.getItem("otAnalytics.blockedCursor.v1")) || Date.now();
+
+/**
+ * Watchers, plus anyone turned away since the last poll.
+ *
+ * Both come from one request: the dashboard already asks who is watching, and a
+ * refused attempt is the same kind of news.
+ */
 export async function fetchWatchers() {
   try {
-    const data = await ownerApi("/shares/watchers");
+    const data = await ownerApi(`/shares/watchers?since=${blockedCursor}`);
 
-    return data.watchers ?? [];
+    if (typeof data.now === "number") {
+      blockedCursor = data.now;
+      window.localStorage.setItem("otAnalytics.blockedCursor.v1", String(blockedCursor));
+    }
+
+    return { watchers: data.watchers ?? [], blocked: data.blocked ?? [] };
   } catch {
-    return [];
+    return { watchers: [], blocked: [] };
   }
 }

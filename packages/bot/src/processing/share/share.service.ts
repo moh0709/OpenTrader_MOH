@@ -140,6 +140,29 @@ export async function releaseDevice(id: number): Promise<boolean> {
   return true;
 }
 
+/**
+ * Someone tried to open a link from a device that does not hold it.
+ *
+ * Kept in memory rather than in the database: this is a notification, not a
+ * record. Losing it on restart is fine; growing a table of them is not.
+ */
+export type BlockedAttempt = { at: number; shareId: number; name: string; email: string };
+
+const BLOCKED_LIMIT = 50;
+const blockedAttempts: BlockedAttempt[] = [];
+
+function recordBlocked(attempt: BlockedAttempt) {
+  blockedAttempts.push(attempt);
+  if (blockedAttempts.length > BLOCKED_LIMIT) blockedAttempts.shift();
+
+  logger.warn(`[Share] ${attempt.name} <${attempt.email}> tried to open their link from another device`);
+}
+
+/** Refused attempts after a cursor, newest last, for the owner to be told about. */
+export function blockedSince(since: number): BlockedAttempt[] {
+  return blockedAttempts.filter((attempt) => attempt.at > since);
+}
+
 export type ViewerSession =
   | { ok: true; name: string; email: string; expiresAt: number }
   | { ok: false; code: string; message: string };
@@ -157,7 +180,15 @@ export async function admitViewer(token: string, deviceId: string, now = Date.no
   if (!link) return { ok: false, code: "invalid", message: "This link is not valid." };
 
   const decision = decideAccess(link, deviceId, now);
-  if (!decision.allowed) return { ok: false, code: decision.code, message: decision.message };
+  if (!decision.allowed) {
+    // Only a wrong device is worth telling the owner about: an expired or
+    // revoked link is something they did on purpose.
+    if (decision.code === "in_use") {
+      recordBlocked({ at: now, shareId: link.id, name: link.name, email: link.email });
+    }
+
+    return { ok: false, code: decision.code, message: decision.message };
+  }
 
   await xprisma.shareLink.update({
     where: { id: link.id },

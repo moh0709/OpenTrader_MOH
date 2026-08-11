@@ -8,7 +8,7 @@
  */
 import { clearPassword, getPassword, setPassword, verifyPassword } from "./lib/api.js";
 import { store } from "./lib/store.js";
-import { initToasts, toastForEvent } from "./lib/toast.js";
+import { initToasts, toast, toastForEvent } from "./lib/toast.js";
 import { initPoller, resetCursor, schedule, tick } from "./lib/poller.js";
 import { PRESETS, addWidget, applyHeightMode, applyPreset, initLayout, instanceCount, resetLayout } from "./lib/layout.js";
 import { groupedCatalog } from "./widgets/index.js";
@@ -383,7 +383,7 @@ function start() {
   showApp();
   applyTheme();
   bindChrome();
-  initToasts(document.querySelector("[data-toasts]"));
+  initToasts(document.querySelector("[data-toasts]"), document.querySelector("[data-toasts-alerts]"));
   initLayout(document.querySelector("[data-grid]"));
 
   store.subscribe((reason) => {
@@ -399,8 +399,22 @@ function start() {
   const pollWatchers = async () => {
     if (document.visibilityState !== "visible") return;
 
-    store.data.watchers = await fetchWatchers();
+    const { watchers, blocked } = await fetchWatchers();
+
+    store.data.watchers = watchers;
     store.emit("watchers");
+
+    // Someone tried to open a link from a device that does not hold it. Stays
+    // on screen until dismissed: this is the one thing here worth interrupting for.
+    for (const attempt of blocked) {
+      toast({
+        title: "Share link used on another device",
+        message: `${attempt.name} <${attempt.email}> tried to open their link from a device that is not theirs. They were refused.`,
+        hint: `${new Date(attempt.at).toLocaleTimeString()} — close this to dismiss`,
+        severity: "danger",
+        sticky: true,
+      });
+    }
   };
 
   void pollWatchers();

@@ -16,6 +16,7 @@ import { xprisma } from "@opentrader/db";
 import { findStrandedPositions, recoverPositions } from "../processing/executors/recover-position.js";
 import { previewPurge, purgeBotTrades, setBotLimits } from "../processing/executors/purge-bot.js";
 import {
+  blockedSince,
   createShare,
   currentWatchers,
   deleteShare,
@@ -293,8 +294,17 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     return previewPurge(botId, OWNER_ID);
   });
 
-  /** Who is watching a shared link right now. Drives the presence indicator. */
-  fastify.get("/shares/watchers", async () => ({ watchers: await currentWatchers() }));
+  /**
+   * Who is watching, and who was turned away.
+   *
+   * Both ride the one poll the dashboard already makes, so telling the owner
+   * about a refused attempt costs no extra request.
+   */
+  fastify.get("/shares/watchers", async (request) => {
+    const since = num((request.query as Record<string, unknown>).since) ?? Date.now();
+
+    return { watchers: await currentWatchers(), blocked: blockedSince(since), now: Date.now() };
+  });
 
   fastify.get("/shares", async (request) => ({
     shares: await listShares(publicBaseUrl(request.headers.host, request.protocol)),
