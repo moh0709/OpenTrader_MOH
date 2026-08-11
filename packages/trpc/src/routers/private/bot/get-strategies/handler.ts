@@ -3,6 +3,7 @@ import { zodToJsonSchema, type JsonSchema7Type } from "zod-to-json-schema";
 import { BotTemplate } from "@opentrader/bot-processor";
 import { templates } from "@opentrader/bot-templates";
 import { customStrategies } from "@opentrader/bot-templates/server";
+import { xprisma } from "@opentrader/db";
 import type { Context } from "../../../../utils/context.js";
 
 type Options = {
@@ -32,6 +33,28 @@ export async function getStrategies({ ctx }: Options) {
     ...templates,
   };
 
+  /**
+   * Templates that existing bots are actually running.
+   *
+   * A hidden strategy is left out of the strategy picker, which is right for one
+   * nobody should pick by hand. But the bot edit form drives that same picker
+   * from the bot's own template: when the template is hidden there is no option
+   * matching it, the select clears itself to null, and the form dies with
+   * "Cannot extract strategy schema. Strategy null not found". Grid and DCA bots
+   * are created through their own dedicated flows and land on hidden templates,
+   * so every one of them was uneditable.
+   *
+   * A strategy that is in use has to be selectable, otherwise its bots cannot be
+   * edited. It stays hidden everywhere else.
+   */
+  const botsInUse = (await xprisma.bot.findMany({
+    where: { ownerId: ctx.user.id },
+    select: { template: true },
+    distinct: ["template"],
+  })) as Array<{ template: string }>;
+
+  const templatesInUse = new Set(botsInUse.map((bot) => bot.template));
+
   const result: Record<StrategyName, StrategyInfo> = {};
   for (const [strategyName, strategy] of Object.entries(strategies)) {
     const zodSchema = isZodObject(strategy.schema) ? strategy.schema : z.object({});
@@ -42,7 +65,7 @@ export async function getStrategies({ ctx }: Options) {
       isCustom: strategyName in customStrategies,
       displayName: strategy.displayName,
       description: strategy.description,
-      hidden: !!strategy.hidden,
+      hidden: !!strategy.hidden && !templatesInUse.has(strategyName),
       runPolicy: strategy.runPolicy,
       watchers: strategy.watchers,
       requiredHistory: strategy.requiredHistory,
