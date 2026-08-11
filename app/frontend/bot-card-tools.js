@@ -56,6 +56,14 @@ function ensureStyles() {
     .ot-bot-tools button[data-tone="danger"] { color: var(--joy-palette-danger-plainColor, #d03b3b); }
     .ot-bot-tools button[disabled] { opacity: .5; cursor: default; }
     .ot-bot-limit { font-size: 11px; opacity: .7; align-self: center; }
+    .ot-bot-note { font-size: 11.5px; margin-top: 6px; opacity: .85; color: var(--joy-palette-success-plainColor, #0ca30c); }
+    .ot-bot-tools-inline {
+      font: inherit; font-size: 13px; line-height: 1; margin-left: 8px;
+      padding: 8px 12px; border-radius: 8px; cursor: pointer;
+      border: 1px solid var(--joy-palette-divider, rgba(128,128,128,.3));
+      background: transparent; color: var(--joy-palette-danger-plainColor, #d03b3b);
+    }
+    .ot-bot-tools-inline:hover { border-color: var(--joy-palette-danger-plainColor, #d03b3b); }
 
     .ot-modal { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; }
     .ot-modal__scrim { position: absolute; inset: 0; background: rgba(0,0,0,.45); }
@@ -270,7 +278,27 @@ async function openPurge(botId, botName) {
     onConfirm: () => api("/actions/bot.purgeTrades", { method: "POST", body: JSON.stringify({ botId }) }),
   });
 
-  if (done) window.location.reload();
+  // No reload. The card shows the bot's name, symbol and status - none of which
+  // a purge changes - so reloading the page would throw away scroll position
+  // and any other open work to redraw something identical.
+  if (done) note(botId, `Purged: ${preview.trades} trades and ${preview.orders} orders removed.`);
+}
+
+/** A short confirmation on the card itself, in place of reloading the page. */
+function note(botId, text) {
+  const link = [...document.querySelectorAll(CARD_LINK)].find((node) => botIdFrom(node) === botId);
+  const tools = link && cardFor(link)?.querySelector(`[${MARK}]`);
+  if (!tools) return;
+
+  let line = tools.parentElement.querySelector(".ot-bot-note");
+  if (!line) {
+    line = document.createElement("div");
+    line.className = "ot-bot-note";
+    tools.after(line);
+  }
+
+  line.textContent = text;
+  window.setTimeout(() => line.remove(), 8000);
 }
 
 async function openLimits(botId, botName) {
@@ -335,6 +363,86 @@ function cardFor(link) {
   return link.parentElement;
 }
 
+/**
+ * Purge every bot that can be purged, in one confirmed pass.
+ *
+ * Built from the same previews as the single-bot dialog, so the totals are real,
+ * and it names the bots it will skip rather than silently doing less than it
+ * says. Running bots are skipped for the same reason as always: a purge
+ * underneath one produces a half-state, not a clean slate.
+ */
+async function openPurgeAll() {
+  const links = [...document.querySelectorAll(CARD_LINK)];
+  const bots = links.map((link) => ({ id: botIdFrom(link), name: link.textContent?.trim() })).filter((b) => b.id !== null);
+
+  const previews = [];
+  for (const bot of bots) {
+    try {
+      previews.push({ ...(await api(`/bots/${bot.id}/purge-preview`)), botId: bot.id });
+    } catch {
+      // A bot we cannot read is a bot we will not touch.
+    }
+  }
+
+  const doable = previews.filter((p) => !p.blockedReason && p.trades > 0);
+  const blocked = previews.filter((p) => p.blockedReason);
+  const empty = previews.filter((p) => !p.blockedReason && p.trades === 0);
+
+  const body = document.createElement("div");
+  body.append(
+    row("Bots to purge", String(doable.length)),
+    row("Trades", String(doable.reduce((sum, p) => sum + p.trades, 0))),
+    row("Orders", String(doable.reduce((sum, p) => sum + p.orders, 0))),
+    row("Open positions", String(doable.reduce((sum, p) => sum + p.openPositions, 0))),
+    row("Live orders to cancel", String(doable.reduce((sum, p) => sum + p.liveOrders, 0))),
+    row("Realised profit discarded", money(doable.reduce((sum, p) => sum + p.realizedPnl, 0))),
+  );
+
+  const warn = document.createElement("div");
+  warn.className = "ot-modal__warn";
+  warn.textContent =
+    `Every trade of ${doable.length} bot(s) is deleted, open and closed, and cannot be undone.` +
+    (blocked.length > 0 ? ` Skipping ${blocked.length} running bot(s): ${blocked.map((p) => p.botName).join(", ")}.` : "") +
+    (empty.length > 0 ? ` ${empty.length} bot(s) already have nothing to purge.` : "");
+  body.append(warn);
+
+  await modal({
+    title: "Purge all bots",
+    subtitle: "Reset every stopped bot to zero.",
+    body,
+    confirmLabel: `Purge ${doable.length} bot(s)`,
+    tone: "danger",
+    confirmDisabled: doable.length === 0,
+    onConfirm: async () => {
+      // Sequential: each purge cancels orders on the exchange, and a burst of
+      // those in parallel is a good way to get rate limited half way through.
+      for (const preview of doable) {
+        await api("/actions/bot.purgeTrades", { method: "POST", body: JSON.stringify({ botId: preview.botId }) });
+      }
+    },
+  });
+}
+
+/** The page-level Purge all control, placed beside the New bot button. */
+function attachPurgeAll(doc) {
+  const newBot = [...doc.querySelectorAll("button, a")].find((node) => node.textContent?.trim() === "New bot");
+  if (!newBot || doc.querySelector("[data-opentrader-purge-all]")) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("data-opentrader-purge-all", "");
+  button.className = "ot-bot-tools-inline";
+  button.textContent = "Purge all";
+  button.title = "Delete every trade of every stopped bot";
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void openPurgeAll();
+  });
+
+  newBot.parentElement?.append(button);
+}
+
 export function attachBotTools(doc = document) {
   let added = 0;
 
@@ -378,6 +486,8 @@ export function attachBotTools(doc = document) {
     card.append(tools);
     added += 1;
   }
+
+  attachPurgeAll(doc);
 
   return added;
 }
