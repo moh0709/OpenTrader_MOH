@@ -26,3 +26,11 @@ export {
   type RecoverablePosition,
   type RecoveryResult,
 } from "./processing/executors/recover-position.js";
+export {
+  previewPurge,
+  purgeBotTrades,
+  setBotLimits,
+  type PurgePreview,
+  type PurgeResult,
+  type SetLimitsResult,
+} from "./processing/executors/purge-bot.js";

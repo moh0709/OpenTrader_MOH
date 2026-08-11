@@ -214,6 +214,13 @@ model Bot {
 
   createdAt DateTime @default(now())
 
+  /// Maximum quote-currency capital this bot may have committed at once.
+  /// Null or zero means no cap. Enforced where entry orders are placed.
+  maxCapital Float?
+  /// Minimum quote-currency profit a cycle must make. A take profit that would
+  /// earn less is lifted to the price that meets this. Null or zero means none.
+  minProfit  Float?
+
   settings String // JSON stringified
   state    String @default("{}") // JSON stringified
 

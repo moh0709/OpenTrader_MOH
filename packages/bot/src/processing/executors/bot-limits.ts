@@ -1,0 +1,135 @@
+/**
+ * Per-bot trading limits.
+ *
+ * Two guards a strategy does not provide for itself:
+ *
+ *  - **Capital cap** - the most quote currency a bot may have committed at once.
+ *    A grid bot will happily place an entry on every level it has, which on a
+ *    wide grid is far more money than you intended to expose. With a cap set,
+ *    entries stop being placed once the committed total would exceed it.
+ *
+ *  - **Minimum profit** - the least a cycle must earn before its exit is allowed
+ *    to close it. Grid spacing is set in price, not in money, so a tight grid on
+ *    a small quantity can close for fractions of a cent. Rather than block the
+ *    exit, which would strand the position, the take profit is lifted to the
+ *    price that actually earns the floor.
+ *
+ * Both are pure functions of data the caller already has, so the thresholds are
+ * testable without a database, an exchange, or a running bot.
+ */
+export type BotLimits = {
+  /** Maximum quote-currency capital committed at once. Null means no cap. */
+  maxCapital: number | null;
+  /** Minimum quote-currency profit a cycle must make. Null means no floor. */
+  minProfit: number | null;
+};
+
+export const NO_LIMITS: BotLimits = { maxCapital: null, minProfit: null };
+
+/** Reads a limit column, treating zero and negatives as "not set". */
+export function toLimit(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export function toBotLimits(bot: { maxCapital?: number | null; minProfit?: number | null } | null): BotLimits {
+  return { maxCapital: toLimit(bot?.maxCapital), minProfit: toLimit(bot?.minProfit) };
+}
+
+type LimitOrder = {
+  entityType: string;
+  status: string;
+  price: number | null;
+  filledPrice: number | null;
+  quantity: number;
+};
+
+type LimitTrade = { orders: LimitOrder[] };
+
+const ENTRY_TYPES = ["EntryOrder", "SafetyOrder"];
+const EXIT_TYPES = ["TakeProfitOrder", "StopLossOrder"];
+const RESTING = ["Idle", "Placed"];
+
+const isEntry = (o: LimitOrder) => ENTRY_TYPES.includes(o.entityType);
+const isExit = (o: LimitOrder) => EXIT_TYPES.includes(o.entityType);
+
+/**
+ * Quote currency the bot currently has at stake.
+ *
+ * Counts both money already spent on positions that have not closed, and money
+ * earmarked by entry orders resting on the book - an order that is about to fill
+ * is a commitment, not spare capacity, and ignoring it would let a grid blow
+ * straight through its cap the moment the price moved.
+ */
+export function committedCapital(trades: LimitTrade[]): number {
+  let committed = 0;
+
+  for (const trade of trades) {
+    const closed = trade.orders.some((o) => isExit(o) && o.status === "Filled");
+
+    for (const order of trade.orders) {
+      if (!isEntry(order)) continue;
+
+      if (order.status === "Filled") {
+        // Spent, and still held until an exit closes the cycle.
+        if (!closed) committed += (order.filledPrice ?? order.price ?? 0) * order.quantity;
+      } else if (RESTING.includes(order.status)) {
+        committed += (order.price ?? 0) * order.quantity;
+      }
+    }
+  }
+
+  return committed;
+}
+
+/** The quote-currency value an order would commit. */
+export function orderNotional(order: { price: number | null; quantity: number }): number {
+  return (order.price ?? 0) * order.quantity;
+}
+
+export type EntryDecision = { allowed: boolean; reason: string | null };
+
+/**
+ * Whether one more entry fits inside the capital cap.
+ *
+ * A market order has no price to measure, so it cannot be checked against the
+ * cap and is allowed through rather than blocked on a number we do not have.
+ */
+export function allowsEntry(limits: BotLimits, committed: number, notional: number): EntryDecision {
+  if (limits.maxCapital === null) return { allowed: true, reason: null };
+  if (notional <= 0) return { allowed: true, reason: null };
+
+  const projected = committed + notional;
+  if (projected <= limits.maxCapital) return { allowed: true, reason: null };
+
+  return {
+    allowed: false,
+    reason: `capital limit reached: ${projected.toFixed(2)} would exceed ${limits.maxCapital.toFixed(2)} (already committed ${committed.toFixed(2)})`,
+  };
+}
+
+/**
+ * The exit price that earns at least the minimum profit.
+ *
+ * Returns the requested price untouched when it already clears the floor, so a
+ * strategy that is doing the right thing is never second-guessed. Blocking the
+ * exit instead of lifting it would leave the position with nothing to close it,
+ * which is the failure this codebase has already been bitten by once.
+ */
+export function exitPriceForMinProfit(
+  limits: BotLimits,
+  entryPrice: number,
+  quantity: number,
+  requestedPrice: number,
+): number {
+  if (limits.minProfit === null) return requestedPrice;
+  if (quantity <= 0 || !Number.isFinite(entryPrice) || entryPrice <= 0) return requestedPrice;
+
+  const required = entryPrice + limits.minProfit / quantity;
+
+  return requestedPrice >= required ? requestedPrice : required;
+}
+
+/** Profit a cycle would make if its exit filled at this price. */
+export function projectedProfit(entryPrice: number, quantity: number, exitPrice: number): number {
+  return (exitPrice - entryPrice) * quantity;
+}

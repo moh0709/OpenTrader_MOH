@@ -8,6 +8,7 @@ import type { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-exec
 import { OrderExecutor } from "../order/order.executor.js";
 import { decomposeSymbol } from "@opentrader/tools";
 import { canClearRef, shouldCancelOnStop } from "../stop-policy.js";
+import { allowsEntry, committedCapital, exitPriceForMinProfit, orderNotional, toBotLimits } from "../bot-limits.js";
 
 export class TradeExecutor implements ISmartTradeExecutor {
   smartTrade: SmartTradeWithOrders;
@@ -91,6 +92,25 @@ export class TradeExecutor implements ISmartTradeExecutor {
     const { baseCurrency, quoteCurrency } = decomposeSymbol(this.smartTrade.symbol);
 
     if (entryOrder.status === "Idle") {
+      // A grid will place an entry on every level it has, which is usually far
+      // more money than intended. The cap is checked here, at the moment capital
+      // would actually be committed, rather than trusted to the strategy.
+      const limits = await this.botLimits();
+
+      if (limits.maxCapital !== null) {
+        const trades = await xprisma.smartTrade.findMany({
+          where: { botId: this.smartTrade.botId ?? undefined },
+          include: { orders: true },
+        });
+
+        const decision = allowsEntry(limits, committedCapital(trades), orderNotional(entryOrder));
+        if (!decision.allowed) {
+          logger.info(`[TradeExecutor] Skipped entry for [ST - ${this.smartTrade.ref}]: ${decision.reason}`);
+
+          return false;
+        }
+      }
+
       const orderExecutor = new OrderExecutor(entryOrder, this.exchange, this.smartTrade.symbol);
       await orderExecutor.place();
       await this.pull();
@@ -103,7 +123,31 @@ export class TradeExecutor implements ISmartTradeExecutor {
 
       return true;
     } else if (entryOrder.status === "Filled" && takeProfitOrder?.status === "Idle") {
-      const orderExecutor = new OrderExecutor(takeProfitOrder, this.exchange, this.smartTrade.symbol);
+      // Grid spacing is set in price, so a tight grid on a small quantity can
+      // close for fractions of a cent. Lift the exit to the price that actually
+      // earns the floor, rather than blocking it and stranding the position.
+      const limits = await this.botLimits();
+
+      if (limits.minProfit !== null && takeProfitOrder.price !== null && entryOrder.filledPrice !== null) {
+        const lifted = exitPriceForMinProfit(
+          limits,
+          entryOrder.filledPrice,
+          takeProfitOrder.quantity,
+          takeProfitOrder.price,
+        );
+
+        if (lifted > takeProfitOrder.price) {
+          await xprisma.order.update({ where: { id: takeProfitOrder.id }, data: { price: lifted } });
+          await this.pull();
+
+          logger.info(
+            `[TradeExecutor] Raised take profit of [ST - ${this.smartTrade.ref}] from ${takeProfitOrder.price} to ${lifted} to meet the ${limits.minProfit} minimum profit.`,
+          );
+        }
+      }
+
+      const takeProfit = this.smartTrade.orders.find((order) => order.entityType === "TakeProfitOrder")!;
+      const orderExecutor = new OrderExecutor(takeProfit, this.exchange, this.smartTrade.symbol);
       await orderExecutor.place();
       await this.pull();
 
@@ -152,6 +196,18 @@ export class TradeExecutor implements ISmartTradeExecutor {
 
   async onTicker(ticker: ITicker) {
     await this.next({ ticker });
+  }
+
+  /** The owning bot's limits, or none when the trade has no bot. */
+  private async botLimits() {
+    if (this.smartTrade.botId === null) return toBotLimits(null);
+
+    const bot = (await xprisma.bot.findUnique({
+      where: { id: this.smartTrade.botId },
+      select: { maxCapital: true, minProfit: true },
+    })) as { maxCapital: number | null; minProfit: number | null } | null;
+
+    return toBotLimits(bot);
   }
 
   /**

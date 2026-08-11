@@ -12,7 +12,9 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eventBus } from "@opentrader/event-bus";
+import { xprisma } from "@opentrader/db";
 import { findStrandedPositions, recoverPositions } from "../processing/executors/recover-position.js";
+import { previewPurge, purgeBotTrades, setBotLimits } from "../processing/executors/purge-bot.js";
 import { logger } from "@opentrader/logger";
 import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
 import {
@@ -102,12 +104,16 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/logs", params: { botId: "number", limit: "1-200" }, description: "Recent bot log entries." },
       { path: "GET /api/dash/actions/log", params: { since: "epoch ms" }, description: "Audit trail of control actions." },
       { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
+      { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
+      { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
     ],
     actions: [
       { path: "POST /api/dash/actions/bot.start", body: { botId: "number" }, scope: "control", description: "Start a bot." },
       { path: "POST /api/dash/actions/bot.stop", body: { botId: "number" }, scope: "control", description: "Stop a bot. Resting exit orders are cancelled, which strands any open position." },
       { path: "POST /api/dash/actions/bot.restart", body: { botId: "number" }, scope: "control", description: "Stop then start a bot." },
       { path: "POST /api/dash/actions/position.recoverStranded", body: { botId: "number, optional", limit: "1-200, default 25" }, scope: "control", description: "Place replacement exit orders for stranded positions at their original target prices. Check GET /positions/stranded first." },
+      { path: "POST /api/dash/actions/bot.purgeTrades", body: { botId: "number" }, scope: "control", description: "Delete every trade of a bot, open and closed. Destructive and irreversible. Cancels live orders first and refuses while the bot is running. Check the purge-preview first." },
+      { path: "POST /api/dash/actions/bot.setLimits", body: { botId: "number", maxCapital: "number, 0 clears", minProfit: "number, 0 clears" }, scope: "control", description: "Cap the capital a bot may commit at once, and the minimum profit a cycle must make before its exit is allowed to close." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -250,6 +256,29 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     };
   });
 
+  /** A bot's current limits, for the settings dialog to populate itself. */
+  fastify.get("/bots/:botId/limits", async (request, reply) => {
+    const botId = num((request.params as Record<string, unknown>).botId);
+    if (botId === undefined) return reply.code(400).send({ error: "bad_request", message: "botId is required" });
+
+    const bot = (await xprisma.bot.findFirst({
+      where: { id: botId, ownerId: OWNER_ID },
+      select: { id: true, name: true, symbol: true, enabled: true, maxCapital: true, minProfit: true },
+    })) as { id: number; name: string; symbol: string; enabled: boolean; maxCapital: number | null; minProfit: number | null } | null;
+
+    if (!bot) return reply.code(404).send({ error: "not_found", message: "Bot not found" });
+
+    return bot;
+  });
+
+  /** What a purge would remove, and whether it is currently allowed. Read-only. */
+  fastify.get("/bots/:botId/purge-preview", async (request, reply) => {
+    const botId = num((request.params as Record<string, unknown>).botId);
+    if (botId === undefined) return reply.code(400).send({ error: "bad_request", message: "botId is required" });
+
+    return previewPurge(botId, OWNER_ID);
+  });
+
   fastify.get("/actions/log", async (request) => ({
     frozen: agentAccess.isFrozen(),
     tokens: agentAccess.describeTokens(),
@@ -367,6 +396,31 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     });
 
     return result;
+  });
+
+  /**
+   * Delete every trade of a bot. Destructive and irreversible.
+   *
+   * Live orders are cancelled on the exchange first, and a running bot is
+   * refused - see ../processing/executors/purge-bot.ts.
+   */
+  fastify.post("/actions/bot.purgeTrades", async (request: AuthedRequest, reply) =>
+    control(request, reply, "bot.purgeTrades", async (botId) => {
+      const result = await purgeBotTrades(botId, OWNER_ID);
+      if (result.error) throw new Error(result.error);
+    }),
+  );
+
+  /** Set the capital cap and minimum profit. Zero clears a limit. */
+  fastify.post("/actions/bot.setLimits", async (request: AuthedRequest, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+
+    return control(request, reply, "bot.setLimits", async (botId) => {
+      await setBotLimits(botId, OWNER_ID, {
+        maxCapital: body.maxCapital === undefined ? undefined : num(body.maxCapital) ?? 0,
+        minProfit: body.minProfit === undefined ? undefined : num(body.minProfit) ?? 0,
+      });
+    });
   });
 
   /** The emergency switch. Admin only - an agent cannot unfreeze itself. */
