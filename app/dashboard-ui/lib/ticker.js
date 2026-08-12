@@ -14,27 +14,43 @@
 import { money, percent } from "./format.js";
 
 /** How long each trade holds the bar before the next slides in. */
-export const ITEM_MS = 3000;
+export const ITEM_MS = 5000;
+
+/**
+ * How long a manual left/right press pauses the automatic advance.
+ *
+ * Long enough to press again and keep reading without the bar snatching the
+ * trade away mid-sentence, short enough that a bar left alone goes back to
+ * cycling on its own rather than sitting frozen on one trade forever.
+ */
+export const TAKEOVER_MS = 15_000;
 
 /**
  * What the position is doing right now, in the three words the bar shows.
  *
- * These are not decoration - they map onto genuinely different states, and the
- * difference is worth money:
+ * This took two goes to get right, and both failures were the same mistake: a
+ * status that is true but constant tells you nothing.
  *
- *   TAKE PROFIT  a live exit order is resting at its target. The healthy case:
- *                the trade will close itself.
- *   OPEN         the entry filled but no exit order was ever placed, so nothing
- *                will close it until one is.
- *   FLOATING     an exit order existed and was cancelled. The position is adrift
- *                with the market and its profit is being forgone - the case
- *                worth noticing, which is why it is called out separately.
+ * Keying it off whether an exit order exists read TAKE PROFIT on all eleven
+ * trades, because every healthy grid position has one. Keying it off whether
+ * the price had reached the target read FLOATING on all eleven, because the
+ * instant it reaches the target the order fills and the position closes - the
+ * state is real but you can never catch it.
+ *
+ * What actually varies, minute to minute, is whether the trade is winning:
+ *
+ *   TAKE PROFIT  an exit is working and the trade is in profit, so if it closed
+ *                on target now it would pay out. The good case.
+ *   FLOATING     an exit is working but the trade is flat or under water, so it
+ *                is still riding the market to get there.
+ *   OPEN         no exit order is working at all. Nothing will close this
+ *                position until one is placed, which is why it is called out
+ *                rather than folded in with the rest.
  */
 export function statusOf(position) {
-  if (position.exitState === "live") return "TAKE PROFIT";
-  if (position.exitState === "abandoned") return "FLOATING";
+  if (position.exitState !== "live") return "OPEN";
 
-  return "OPEN";
+  return (position.floatingPnl ?? 0) > 0 ? "TAKE PROFIT" : "FLOATING";
 }
 
 /**
@@ -59,6 +75,8 @@ export function toTickerItem(position, botNames = {}) {
     // What the trade was opened with, what it is worth now, and the gap.
     opened: money(position.costBasis),
     value: money(position.marketValue ?? position.costBasis + position.floatingPnl),
+    // The raw "now" figure, so a later poll can tell whether it went up.
+    valueRaw: position.marketValue ?? position.costBasis + position.floatingPnl,
     floating: money(position.floatingPnl, { signed: true }),
     change: percent(change),
     // Green and red are near-identical in luminance on yellow, so on their own
@@ -81,27 +99,50 @@ export function toTickerItems(positions, botNames = {}) {
 }
 
 /**
+ * Which trades have gone up since the last time we saw them.
+ *
+ * Kept as a separate pass over a caller-owned map rather than module state, so
+ * the owner dashboard and a shared feed each track their own values and a test
+ * can drive it without reaching into globals.
+ */
+export function markRising(items, previous) {
+  return items.map((item) => {
+    const before = previous.get(item.key);
+    const rising = before !== undefined && item.valueRaw > before;
+
+    previous.set(item.key, item.valueRaw);
+
+    return rising ? { ...item, rising: true } : item;
+  });
+}
+
+/**
  * Mount the bar and cycle it.
  *
- * `getItems` is called on each refresh rather than the items being passed in,
- * so the bar always reads from whatever the page last polled instead of keeping
- * a second copy that can drift out of date.
+ * `getItems` is called on each turn rather than the items being passed in, so
+ * the bar always reads from whatever the page last polled instead of keeping a
+ * second copy that can drift out of date.
  *
  * The cycle is driven by setTimeout rather than a CSS animation loop because it
  * must survive the list changing underneath it: positions close and open while
  * the bar is running, and an index into a stale array would skip or repeat.
  */
-export function mountTicker(bar, getItems) {
+export function mountTicker(bar, getItems, { itemMs = ITEM_MS, takeoverMs = TAKEOVER_MS } = {}) {
   const track = bar.querySelector("[data-ticker-item]");
   const label = bar.querySelector("[data-ticker-count]");
+  const prevButton = bar.querySelector("[data-ticker-prev]");
+  const nextButton = bar.querySelector("[data-ticker-next]");
 
   let index = 0;
   let timer = null;
   let stopped = false;
+  let manualUntil = 0;
 
-  const show = (item) => {
-    // Restart the slide-in by tearing the node out and rebuilding it: simply
-    // reassigning the class would not replay an animation already at its end.
+  const held = () => Date.now() < manualUntil;
+
+  const render = (item) => {
+    // Restart the slide-in by rebuilding the node: reassigning the class alone
+    // would not replay an animation already sitting at its end.
     track.replaceChildren();
     track.classList.remove("ticker__item--in");
 
@@ -124,47 +165,97 @@ export function mountTicker(bar, getItems) {
         sep.textContent = "|";
         line.append(sep);
       }
+
       const span = document.createElement("span");
       span.className = cls;
+      // Only the "now" figure pulses, and only when it has actually risen since
+      // the previous poll. Pulsing everything green would be decoration; this is
+      // meant to catch the eye on the one number that moved up.
+      if (cls === "ticker__value" && item.rising) span.classList.add("ticker__value--rising");
       span.textContent = text;
       line.append(span);
     });
 
     track.append(line);
-    // Force a reflow so the browser treats the class as a fresh transition.
     void track.offsetWidth;
     track.classList.add("ticker__item--in");
   };
 
-  const tick = () => {
-    if (stopped) return;
+  const idle = () => {
+    track.replaceChildren();
+    const line = document.createElement("span");
+    line.className = "ticker__line ticker__line--flat";
+    line.textContent = "No open trades";
+    track.append(line);
+    track.classList.add("ticker__item--in");
+    if (label) label.textContent = "";
+  };
 
+  /** Draw whatever `index` currently points at, without touching the timer. */
+  const paint = () => {
     const items = getItems();
 
     if (!items || items.length === 0) {
-      track.replaceChildren();
-      const idle = document.createElement("span");
-      idle.className = "ticker__line ticker__line--flat";
-      idle.textContent = "No open trades";
-      track.append(idle);
-      track.classList.add("ticker__item--in");
-      if (label) label.textContent = "";
-      timer = window.setTimeout(tick, ITEM_MS);
+      idle();
 
       return;
     }
 
     if (index >= items.length) index = 0;
-    const item = items[index];
-    if (label) label.textContent = `${index + 1}/${items.length}`;
-    show(item);
-    index += 1;
+    if (index < 0) index = items.length - 1;
 
-    timer = window.setTimeout(tick, ITEM_MS);
+    if (label) label.textContent = `${index + 1}/${items.length}${held() ? " · held" : ""}`;
+    render(items[index]);
   };
 
-  // A hidden tab should not burn a timer per 3 seconds redrawing something
-  // nobody is looking at; resume from where it left off on return.
+  const arm = (delay) => {
+    if (timer !== null) window.clearTimeout(timer);
+    timer = window.setTimeout(tick, delay);
+  };
+
+  function tick() {
+    if (stopped) return;
+
+    // A manual press owns the bar until it lapses; keep checking back so the
+    // automatic advance resumes on its own the moment the hold expires.
+    if (held()) {
+      arm(Math.max(250, manualUntil - Date.now()));
+
+      return;
+    }
+
+    paint();
+    index += 1;
+    arm(itemMs);
+  }
+
+  /**
+   * Move `delta` trades from the one currently on screen and hold there.
+   *
+   * `index` always points at what comes *next*, so the trade being read is the
+   * one before it - hence the -1. Stated this way the callers can say what they
+   * mean, which is +1 for forward and -1 for back.
+   */
+  const step = (delta) => {
+    const items = getItems();
+    if (!items || items.length === 0) return;
+
+    manualUntil = Date.now() + takeoverMs;
+
+    const showing = index - 1;
+    index = ((showing + delta) % items.length + items.length) % items.length;
+    paint();
+    // Leave it pointing past what we just drew, so when the hold lapses the bar
+    // carries on rather than repeating the trade the reader just looked at.
+    index += 1;
+    arm(takeoverMs);
+  };
+
+  prevButton?.addEventListener("click", () => step(-1));
+  nextButton?.addEventListener("click", () => step(1));
+
+  // A hidden tab should not burn a timer redrawing something nobody is looking
+  // at; resume from where it left off on return.
   const onVisibility = () => {
     if (document.visibilityState === "visible") {
       if (timer === null && !stopped) tick();

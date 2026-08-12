@@ -12,7 +12,7 @@
  */
 import { el, mount } from "./dom.js";
 import { count, dateTime, duration, money, percent, pnlClass, timeAgo } from "./format.js";
-import { mountTicker, toTickerItems } from "./ticker.js";
+import { markRising, mountTicker, toTickerItems } from "./ticker.js";
 
 const DEVICE_KEY = "otAnalytics.deviceId.v1";
 
@@ -198,6 +198,7 @@ export function startLiveFeed(token) {
 
   let timer = null;
   let tickerItems = [];
+  const tickerValues = new Map();
 
   mountTicker(document.querySelector("[data-ticker]"), () => tickerItems);
 
@@ -214,7 +215,7 @@ export function startLiveFeed(token) {
 
       renderFeed(body, data);
       // The same bar the owner sees, built from the same position rows.
-      tickerItems = toTickerItems(data.openPositions ?? []);
+      tickerItems = markRising(toTickerItems(data.openPositions ?? []), tickerValues);
       document.querySelector("[data-refresh-status]").textContent = "live";
     } catch (error) {
       // "Already in use" and "expired" are final: stop polling and say so.

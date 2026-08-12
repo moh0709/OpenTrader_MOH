@@ -634,3 +634,40 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
   .ticker__item { transform: none; }
   .ticker__item--in { transform: none; transition: opacity .3s ease; }
 }
+
+/* Manual take-over: step through trades by hand, and the bar resumes cycling
+   on its own once the buttons have been left alone. */
+.ticker__nav {
+  flex: none;
+  width: 26px; height: 26px; padding: 0;
+  display: grid; place-items: center;
+  font: inherit; font-size: 10px; line-height: 1;
+  color: var(--ticker-ink);
+  background: rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.28); border-radius: 4px;
+  cursor: pointer;
+}
+
+.ticker__nav:hover { background: rgba(0, 0, 0, 0.18); }
+.ticker__nav:active { transform: translateY(1px); }
+.ticker__nav:focus-visible { outline: 2px solid var(--ticker-ink); outline-offset: 1px; }
+
+/* The "now" figure, when it has risen since the last poll. Two beats and stop:
+   a permanent pulse becomes wallpaper and stops being noticed, which defeats
+   the point of using motion to draw the eye at all. */
+.ticker__value--rising {
+  color: var(--ticker-up); font-weight: 700;
+  border-radius: 3px;
+  animation: ticker-pulse .9s ease-out 2;
+}
+
+@keyframes ticker-pulse {
+  0%   { background: rgba(10, 82, 48, 0); box-shadow: 0 0 0 0 rgba(10, 82, 48, .55); }
+  35%  { background: rgba(10, 82, 48, .18); box-shadow: 0 0 0 5px rgba(10, 82, 48, 0); }
+  100% { background: rgba(10, 82, 48, 0); box-shadow: 0 0 0 0 rgba(10, 82, 48, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the colour and weight change, drop the movement. */
+  .ticker__value--rising { animation: none; background: rgba(10, 82, 48, .16); }
+}

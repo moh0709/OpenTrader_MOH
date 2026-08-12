@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { statusOf, toTickerItem, toTickerItems } from "./ticker.js";
+import { markRising, statusOf, toTickerItem, toTickerItems } from "./ticker.js";
 
 const position = (over = {}) => ({
   smartTradeId: 1,
@@ -12,20 +12,60 @@ const position = (over = {}) => ({
   floatingPnl: 16.67,
   floatingPnlPercent: 1.667,
   exitState: "live",
+  targetPrice: 62_000,
   ...over,
 });
 
 describe("statusOf", () => {
-  it("calls a working exit order a take profit", () => {
-    expect(statusOf(position({ exitState: "live" }))).toBe("TAKE PROFIT");
+  it("says take profit when an exit is working and the trade is up", () => {
+    expect(statusOf(position({ exitState: "live", floatingPnl: 12 }))).toBe("TAKE PROFIT");
   });
 
-  it("calls a cancelled exit floating, because that is the case worth noticing", () => {
-    expect(statusOf(position({ exitState: "abandoned" }))).toBe("FLOATING");
+  it("says floating when an exit is working but the trade is flat or down", () => {
+    expect(statusOf(position({ exitState: "live", floatingPnl: -3 }))).toBe("FLOATING");
+    expect(statusOf(position({ exitState: "live", floatingPnl: 0 }))).toBe("FLOATING");
   });
 
-  it("calls a position with no exit order open", () => {
-    expect(statusOf(position({ exitState: "missing" }))).toBe("OPEN");
+  it("says open when no exit order is working, however well the trade is doing", () => {
+    expect(statusOf(position({ exitState: "missing", floatingPnl: 50 }))).toBe("OPEN");
+    expect(statusOf(position({ exitState: "abandoned", floatingPnl: 50 }))).toBe("OPEN");
+  });
+});
+
+describe("markRising", () => {
+  it("flags nothing the first time, having nothing to compare against", () => {
+    const seen = new Map();
+
+    expect(markRising(toTickerItems([position()], {}), seen)[0].rising).toBeUndefined();
+  });
+
+  it("flags a trade whose value went up since the last poll", () => {
+    const seen = new Map();
+
+    markRising(toTickerItems([position({ marketValue: 1000 })], {}), seen);
+    const after = markRising(toTickerItems([position({ marketValue: 1010 })], {}), seen);
+
+    expect(after[0].rising).toBe(true);
+  });
+
+  it("does not flag a fall or a flat value", () => {
+    const seen = new Map();
+
+    markRising(toTickerItems([position({ marketValue: 1000 })], {}), seen);
+    expect(markRising(toTickerItems([position({ marketValue: 990 })], {}), seen)[0].rising).toBeUndefined();
+    expect(markRising(toTickerItems([position({ marketValue: 990 })], {}), seen)[0].rising).toBeUndefined();
+  });
+
+  it("tracks each trade separately", () => {
+    const seen = new Map();
+    const round = (a, b) =>
+      markRising(toTickerItems([position({ smartTradeId: 1, marketValue: a }), position({ smartTradeId: 2, marketValue: b })], {}), seen);
+
+    round(1000, 1000);
+    const after = round(1010, 990);
+
+    expect(after.find((i) => i.key === 1).rising).toBe(true);
+    expect(after.find((i) => i.key === 2).rising).toBeUndefined();
   });
 });
 
