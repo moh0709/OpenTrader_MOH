@@ -15,6 +15,8 @@ import { groupedCatalog } from "./widgets/index.js";
 import { el, mount } from "./lib/dom.js";
 import { money, timeAgo } from "./lib/format.js";
 import { fetchWatchers, renderShareManager, shareToken, startLiveFeed } from "./lib/share.js";
+import { mountTicker, toTickerItems } from "./lib/ticker.js";
+import { query } from "./lib/api.js";
 
 const app = document.getElementById("app");
 const login = document.getElementById("login");
@@ -419,6 +421,30 @@ function start() {
 
   void pollWatchers();
   window.setInterval(() => void pollWatchers(), 15_000);
+
+  // The bottom ticker polls on its own rather than riding the widget refresh:
+  // it has to keep running whether or not the user has added a positions
+  // widget, and it is the one thing on the page that is always visible.
+  let tickerItems = [];
+
+  const pollTicker = async () => {
+    if (document.visibilityState !== "visible") return;
+
+    try {
+      // No `state`: the filter is an enum of live/abandoned/missing, and
+      // leaving it off is what means "all three", which is what the bar shows.
+      const view = await query("dashboard.positions", { includePending: false });
+
+      tickerItems = toTickerItems(view.positions, view.botNames);
+    } catch {
+      // Keep showing the last good set. A blank bar on one failed poll would
+      // read as "no open trades", which is a different and alarming claim.
+    }
+  };
+
+  void pollTicker();
+  window.setInterval(() => void pollTicker(), 5000);
+  mountTicker(document.querySelector("[data-ticker]"), () => tickerItems);
 
   initPoller({
     onEvents: (events) => {

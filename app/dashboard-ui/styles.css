@@ -538,3 +538,99 @@ button, input, select { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------------------------------------------------------------------------
+   Lower third: open trades, one at a time, on a broadcast-yellow bar.
+
+   The yellow is deliberate and stays yellow in dark mode. It is a signal
+   colour, not a surface: the whole point is that it reads as a separate layer
+   over the dashboard the way a news channel's ticker sits over the picture.
+   Dark mode only takes it down a shade so it does not glare.
+
+   Everything on it is therefore coloured for yellow, not for the page. The
+   usual --good-text / --critical pair is tuned for a near-white or near-black
+   surface and drops to about 3:1 here; these two are darkened to clear 4.5:1
+   against the bar in both themes.
+--------------------------------------------------------------------------- */
+:root {
+  --ticker-bg: #f5c518;
+  --ticker-ink: #141310;
+  --ticker-up: #0a5230;
+  --ticker-down: #8f1010;
+  --ticker-h: 40px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --ticker-bg: #e0ae10; }
+}
+
+:root[data-theme="dark"] { --ticker-bg: #e0ae10; }
+
+.ticker {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+  display: flex; align-items: center; gap: 12px;
+  height: var(--ticker-h); padding: 0 12px;
+  background: var(--ticker-bg); color: var(--ticker-ink);
+  border-top: 1px solid rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.18);
+}
+
+.ticker[hidden] { display: none; }
+
+.ticker__tag {
+  flex: none;
+  padding: 4px 8px; border-radius: 3px;
+  background: var(--ticker-ink); color: var(--ticker-bg);
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+}
+
+/* The window the item slides into. Hides the item's starting offset. */
+.ticker__view { flex: 1; overflow: hidden; min-width: 0; }
+
+.ticker__item {
+  opacity: 0; transform: translateX(28px);
+  will-change: transform, opacity;
+}
+
+.ticker__item--in {
+  opacity: 1; transform: translateX(0);
+  transition: transform .45s cubic-bezier(.22, .61, .36, 1), opacity .45s ease;
+}
+
+/* One line, never wrapped: a half-visible second line reads as a glitch. */
+.ticker__line {
+  display: flex; align-items: center; gap: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.ticker__bot { font-weight: 700; }
+.ticker__sym { opacity: .8; }
+.ticker__status { font-weight: 700; letter-spacing: .04em; }
+.ticker__sep { opacity: .45; }
+.ticker__opened, .ticker__value { opacity: .85; }
+.ticker__pnl { font-weight: 700; }
+
+.ticker__line--up .ticker__pnl { color: var(--ticker-up); }
+.ticker__line--down .ticker__pnl { color: var(--ticker-down); }
+
+.ticker__count { flex: none; font-size: 11px; opacity: .7; font-variant-numeric: tabular-nums; }
+
+/* Keep the bar clear of the page's own furniture. */
+body:has(.ticker:not([hidden])) .grid { padding-bottom: calc(var(--ticker-h) + 16px); }
+body:has(.ticker:not([hidden])) .toasts { bottom: calc(var(--ticker-h) + 16px); }
+body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
+
+@media (max-width: 640px) {
+  .ticker { font-size: 12px; gap: 8px; }
+  .ticker__tag { font-size: 10px; padding: 3px 6px; }
+  /* On a phone the count is the first thing worth losing. */
+  .ticker__count { display: none; }
+}
+
+/* Respect a user who has asked for less motion: no slide, just a fade. */
+@media (prefers-reduced-motion: reduce) {
+  .ticker__item { transform: none; }
+  .ticker__item--in { transform: none; transition: opacity .3s ease; }
+}

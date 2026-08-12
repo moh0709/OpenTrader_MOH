@@ -108,6 +108,18 @@
       </form>
     </div>
 
+    <!-- The lower third: open trades, one at a time. Sits outside [data-grid]
+         so it is page furniture rather than a widget - it must not be
+         removable, resizable or reorderable, and it shows on a shared feed
+         where there are no widgets at all. -->
+    <div class="ticker" data-ticker hidden>
+      <span class="ticker__tag">LIVE TRADES</span>
+      <div class="ticker__view">
+        <div class="ticker__item" data-ticker-item></div>
+      </div>
+      <span class="ticker__count" data-ticker-count></span>
+    </div>
+
     <div class="toasts" data-toasts aria-live="polite" aria-atomic="false"></div>
     <!-- Alerts that must be acknowledged rather than watched go top right and
          stay until dismissed. -->

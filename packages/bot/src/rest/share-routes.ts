@@ -38,7 +38,17 @@ type DerivedShape = {
     exitAt: number;
     outcome: string;
   }>;
-  openPositions: Array<{ floatingPnl: number | null }>;
+  openPositions: Array<{
+    botId: number | null;
+    symbol: string;
+    exitState: string;
+    entryPrice: number;
+    costBasis: number;
+    markPrice: number | null;
+    marketValue: number | null;
+    floatingPnl: number | null;
+    floatingPnlPercent: number | null;
+  }>;
   botStats: Array<{
     name: string;
     symbol: string;
@@ -120,6 +130,22 @@ export async function shareRoutes(fastify: FastifyInstance) {
         netPnl: bot.realized.netPnl,
         openPositions: bot.positions.open,
         floatingPnl: bot.positions.floatingPnl,
+      })),
+      // Open positions, for the bottom ticker. Deliberately reduced: bot name
+      // and symbol rather than ids, no smart-trade or order identifiers, and
+      // nothing a viewer could act on. It is the same class of information the
+      // per-bot rows above already expose, one row per position instead of
+      // summed, so the shared bar can say exactly what the owner's says.
+      openPositions: analytics.openPositions.map((position) => ({
+        botName: position.botId === null ? "—" : (context.botNames.get(position.botId) ?? `Bot ${position.botId}`),
+        symbol: position.symbol,
+        exitState: position.exitState,
+        costBasis: position.costBasis,
+        markPrice: position.markPrice,
+        marketValue: position.marketValue,
+        floatingPnl: position.floatingPnl,
+        floatingPnlPercent: position.floatingPnlPercent,
+        entryPrice: position.entryPrice,
       })),
       recentTrades: closed.slice(0, 30).map((rt) => ({
         botName: rt.botId === null ? "—" : (context.botNames.get(rt.botId) ?? `Bot ${rt.botId}`),
