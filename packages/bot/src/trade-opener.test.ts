@@ -20,7 +20,16 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@opentrader/db", () => ({
   xprisma: {
-    bot: { findUnique: async () => state.bot },
+    bot: {
+      // Mirrors prisma: relations come back only when explicitly included.
+      // A mock that always returns them hides exactly the bug where the query
+      // forgets to ask, which is a 500 at runtime rather than a clean refusal.
+      findUnique: async ({ include }: { include?: { exchangeAccount?: boolean } } = {}) => {
+        if (!state.bot) return null;
+        const { exchangeAccount, ...rest } = state.bot as Record<string, unknown>;
+        return include?.exchangeAccount ? { ...rest, exchangeAccount } : rest;
+      },
+    },
     smartTrade: {
       findMany: async () => state.trades,
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -39,12 +48,18 @@ vi.mock("@opentrader/event-bus", () => ({
 
 vi.mock("@opentrader/exchanges", () => ({
   exchangeProvider: {
-    fromAccount: () => ({
-      getTicker: async () => {
-        if (!state.ticker) throw new Error("no ticker");
-        return state.ticker;
-      },
-    }),
+    // The real implementation destructures `{ id }` off the account, so it
+    // throws on undefined. Reproducing that is what makes a forgotten prisma
+    // `include` fail here instead of in production.
+    fromAccount: (account: { id: number } | undefined) => {
+      if (!account?.id) throw new TypeError("Cannot destructure property 'id' of 'exchangeAccount' as it is undefined.");
+      return {
+        getTicker: async () => {
+          if (!state.ticker) throw new Error("no ticker");
+          return state.ticker;
+        },
+      };
+    },
   },
 }));
 

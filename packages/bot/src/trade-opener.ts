@@ -153,7 +153,13 @@ export async function openSmartTrade(
     return refuse("Manual trading is disabled on this instance.");
   }
 
-  const bot = await xprisma.bot.findUnique({ where: { id: params.botId } });
+  // The relation must be requested explicitly — without it `exchangeAccount` is
+  // undefined and building the exchange client throws before any limit is
+  // checked, turning a request that should be cleanly refused into a 500.
+  const bot = await xprisma.bot.findUnique({
+    where: { id: params.botId },
+    include: { exchangeAccount: true },
+  });
   if (!bot) {
     rejections.push(`bot ${params.botId} not found`);
     return refuse(`No bot with id ${params.botId}.`);
