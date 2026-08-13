@@ -55,12 +55,20 @@ no-op when the bot is stopped, so closing works either way.
 guaranteed exit, taker fee. `mode: "limit"` rests the exit on the passive side of
 the book for the maker fee, but **may never fill**.
 
-On OKX spot the difference is taker 0.10% vs maker 0.08% — about **2 basis
-points, or $0.02 per $100 closed**. The spread is negligible on liquid pairs
-(BTC/USDT quotes ~$0.01–0.10 wide on a $63k price). If the intent is to be *out*
-of a position, take the market exit; 2bps is far cheaper than a limit order that
-never fills during a move. If the ticker is unavailable, limit mode falls back to
-market rather than failing.
+**Measured on this account** (53 filled orders): maker **0.20%**, taker **0.35%**
+— a difference of **15 basis points, or $0.15 per $100 closed**.
+
+An earlier version of this document said 2bps, based on OKX's *published standard*
+spot rates of 0.08%/0.10%. This account is on a materially worse fee tier, so the
+real gap is about 7x that. The correction matters: 2bps is noise, 15bps is a
+number worth thinking about before force-closing a large position.
+
+The tradeoff still favours market when the intent is to be *out* — a limit order
+that never fills during a move costs far more than 15bps — but on a big position,
+or when there is no urgency, `mode: "limit"` is now worth considering. The spread
+itself stays negligible on liquid pairs (BTC/USDT quotes ~$0.01–0.10 wide on a
+$63k price). If the ticker is unavailable, limit mode falls back to market rather
+than failing.
 
 ---
 
@@ -174,11 +182,32 @@ call. `stdout` is the MCP protocol channel, so all diagnostics go to `stderr`.
 - Full suite: **251 passing**. The 2 pre-existing `@opentrader/bot` executor
   failures need a live database and are unrelated.
 
+## Live validation
+
+Verified in production on 2026-08-13 against a real OKX position (deal #649,
+bot 17 "OKX Bronze"):
+
+| | |
+|---|---|
+| Entry | Limit Buy 0.0078 BTC @ $63,725.00, fee $0.99 (0.20%) |
+| Forced exit | **Market** Sell 0.0078 BTC @ $63,532.70, fee $1.73 (0.35%) |
+| Result | Filled and confirmed; realised **−$4.23** net |
+
+The database confirms the mechanism worked as designed: the resting take-profit
+order was rewritten to `type=Market` and filled, both orders reached `Filled`, and
+the trade completed. The owning grid bot stayed healthy throughout — still enabled,
+not stuck processing, with its other six grid orders working.
+
+The loss is the point, not a defect: the market had moved below entry, and a force
+close is an immediate exit, not a guaranteed profit. Use it when being out matters
+more than the price.
+
 ## Limitations
 
-1. **Not exercised against a live exchange.** The state machine is unit-tested
-   with a mocked `OrderExecutor`; no real order has been placed by this code.
-   Close one small deal manually before letting Hermes use it.
+1. **No way to open a deal.** The API can close but not create. There is no
+   "create smart trade" endpoint, so a force-closed position can only be replaced
+   when the bot's own strategy conditions trigger. Closing is therefore one-way:
+   easy to exit, not possible to re-enter on demand.
 2. **Fill confirmation is best-effort.** Market orders return `Placed`; the
    exchange decides when they fill. The result reports `filled: false` if the
    fill has not landed by the time the call returns — that is not a failure, and
