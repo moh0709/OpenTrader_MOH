@@ -21,3 +21,5 @@ export { Platform } from "./platform.js";
 export { App } from "./app.js";
 export { closeSmartTrade, closeBotTrades, closeAllTrades } from "./trade-closer.js";
 export type { CloseMode, CloseOutcome, CloseTradeResult } from "./trade-closer.js";
+export { openSmartTrade, manualLimitsFromEnv, manualNotionalToday, openManualPositions } from "./trade-opener.js";
+export type { OpenTradeParams, OpenTradeResult, ManualTradeLimits } from "./trade-opener.js";

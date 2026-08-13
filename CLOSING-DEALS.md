@@ -83,6 +83,7 @@ mutations.
 | `smartTrade.close` | `{ smartTradeId, mode? }` | Force take profit on one deal |
 | `smartTrade.closeBotTrades` | `{ botId, mode? }` | Close every open deal for a bot |
 | `smartTrade.closeAll` | `{ confirm: true, mode? }` | Panic close everything |
+| `smartTrade.open` | `{ botId, side, quantity\|quoteAmount, orderType?, price?, takeProfitPrice?, symbol? }` | **Force-open** a deal, bypassing strategy |
 
 `closeAll` requires `confirm: true` — enforced by the schema *and* re-checked in
 the handler, so the guarantee doesn't depend on validation being wired correctly.
@@ -100,6 +101,37 @@ is visible rather than silent:
 curl -X POST https://ai.omniware.dk/api/trpc/smartTrade.close \
   -H "Authorization: $ADMIN_PASSWORD" -H 'content-type: application/json' \
   -d '{"json":{"smartTradeId":42,"mode":"market"}}'
+```
+
+### Force-opening a deal
+
+`smartTrade.open` is the counterpart to closing, and the asymmetry between them
+drives its design. Closing can only ever reduce exposure, so it needs little
+protection. Opening only ever increases it, and the caller is explicitly
+bypassing the discipline that normally decides entries — the bots keep following
+their strategies; this is the door that goes around them.
+
+So it carries its own hard limits, enforced in the daemon before anything reaches
+the exchange, which the request cannot widen:
+
+| Limit | Env | Default |
+|---|---|---|
+| Per-order notional | `MANUAL_TRADING_MAX_NOTIONAL` | 100 quote |
+| Concurrent manual positions | `MANUAL_TRADING_MAX_POSITIONS` | 5 |
+| Daily manual notional | `MANUAL_TRADING_DAILY_NOTIONAL` | 1000 quote |
+| Symbol allowlist | `MANUAL_TRADING_SYMBOLS` | empty (any) |
+| Master switch | `MANUAL_TRADING=0` | enabled |
+
+**It refuses rather than clamps.** A close that gets reduced is still a close, but
+an entry quietly resized is not the trade the caller asked for — better to say no
+and return the reasons than to open something smaller than intended.
+
+Manually-opened deals are tagged with a `manual:` ref so they can be counted
+against their own budget without touching anything a bot created. The daily
+budget is computed from the database, so it survives a restart.
+
+```bash
+curl -X POST https://ai.omniware.dk/api/trpc/smartTrade.open   -H "Authorization: $ADMIN_PASSWORD" -H 'content-type: application/json'   -d '{"json":{"botId":17,"side":"buy","quoteAmount":50,"orderType":"market"}}'
 ```
 
 ### How this avoids a dependency cycle
@@ -129,6 +161,7 @@ it talks to OpenTrader over loopback, so nothing new is exposed publicly.
 | `close_deal` | **destructive** | Force take profit on one deal |
 | `close_bot_deals` | **destructive** | Close every deal for one bot |
 | `close_all_deals` | **destructive** | Panic close everything (needs `confirm: true`) |
+| `open_deal` | **destructive** | Force-open a position, bypassing strategy |
 
 The three closing tools carry `destructiveHint: true` and their descriptions
 state plainly that they place real, irreversible orders. `stop_bot`'s description
@@ -204,10 +237,11 @@ more than the price.
 
 ## Limitations
 
-1. **No way to open a deal.** The API can close but not create. There is no
-   "create smart trade" endpoint, so a force-closed position can only be replaced
-   when the bot's own strategy conditions trigger. Closing is therefore one-way:
-   easy to exit, not possible to re-enter on demand.
+1. **Opening is not exercised against a live exchange yet.** The limit layer and
+   the state machine are unit-tested, and the order placement reuses the same
+   path a bot-created trade takes — but no manual entry has been filled on a real
+   exchange by this code. Open one small position manually before letting the
+   agent use it, exactly as was done for closing.
 2. **Fill confirmation is best-effort.** Market orders return `Placed`; the
    exchange decides when they fill. The result reports `filled: false` if the
    fill has not landed by the time the call returns — that is not a failure, and

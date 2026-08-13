@@ -26,4 +26,6 @@ export {
   type CloseMode,
   type CloseOutcome,
   type CloseTradeResult,
+  type OpenTradeParams,
+  type OpenTradeResult,
 } from "./services/trade-ops.registry.js";
