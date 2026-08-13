@@ -26,6 +26,8 @@ export {
   type CloseMode,
   type CloseOutcome,
   type CloseTradeResult,
+  type OpenTradeParams,
+  type OpenTradeResult,
 } from "./services/trade-ops.registry.js";
 export { BotService } from "./services/bot.service.js";
 export { dashboardService, type BotLogRow } from "./services/dashboard.service.js";

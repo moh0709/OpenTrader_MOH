@@ -84,6 +84,7 @@ describe.skipIf(!isBuilt)("MCP server over stdio", () => {
         "get_bot_logs",
         "list_bots",
         "list_open_deals",
+        "open_deal",
         "start_bot",
         "stop_bot",
       ].sort(),
@@ -146,6 +147,30 @@ describe.skipIf(!isBuilt)("MCP server over stdio", () => {
 
     expect(received[0].url).toBe("/api/trpc/smartTrade.closeAll");
     expect(JSON.parse(received[0].body).json.confirm).toBe(true);
+  });
+
+  it("marks open_deal destructive and non-idempotent", async () => {
+    const { tools } = await client.listTools();
+    const open = tools.find((t) => t.name === "open_deal")!;
+
+    expect(open.annotations?.destructiveHint).toBe(true);
+    // Unlike closing, opening twice opens two positions.
+    expect(open.annotations?.idempotentHint).toBe(false);
+  });
+
+  it("sends open_deal to the right procedure, defaulting to market", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "open_deal", arguments: { botId: 1, side: "buy", quoteAmount: 25 } });
+
+    expect(received[0].method).toBe("POST");
+    expect(received[0].url).toBe("/api/trpc/smartTrade.open");
+    expect(JSON.parse(received[0].body).json).toMatchObject({
+      botId: 1,
+      side: "buy",
+      quoteAmount: 25,
+      orderType: "market",
+    });
   });
 
   it("reports API failures as tool errors rather than crashing the server", async () => {

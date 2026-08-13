@@ -8,6 +8,7 @@ import type {
   TCloseAllTradesInputSchema,
   TCloseBotTradesInputSchema,
   TCloseTradeInputSchema,
+  TOpenTradeInputSchema,
 } from "./schema.js";
 
 type Options<T> = {
@@ -65,4 +66,15 @@ export async function closeEverything({ input }: Options<TCloseAllTradesInputSch
   const results = await getTradeOps().closeAllTrades(mode);
 
   return summarize(results);
+}
+
+/**
+ * Force-open a deal, bypassing strategy.
+ *
+ * The daemon refuses rather than resizes when a request exceeds its limits, so
+ * a rejected call returns ok: false with the reasons rather than quietly
+ * opening something smaller than was asked for.
+ */
+export async function openTrade({ input }: Options<TOpenTradeInputSchema>) {
+  return getTradeOps().openSmartTrade(input);
 }

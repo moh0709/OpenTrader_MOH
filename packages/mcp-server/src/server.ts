@@ -205,6 +205,41 @@ export function createServer(config: ClientConfig): McpServer {
   );
 
   server.registerTool(
+    "open_deal",
+    {
+      title: "Force-open a new deal",
+      description:
+        "Open a new position immediately, bypassing the bot's strategy. This places a REAL order on the " +
+        "exchange and cannot be undone. " +
+        "Use it only when the user has asked for a specific position — never to 'replace' a deal you just " +
+        "closed, never to average down, and never on your own reading of the market. The bots have their own " +
+        "entry rules; this tool exists to override them deliberately, not to second-guess them. " +
+        "Size with quoteAmount (spend N of the quote currency) or quantity (N of the base currency). " +
+        "The server enforces hard limits on order size, open position count, daily total and permitted symbols; " +
+        "if a request exceeds them it is REFUSED outright rather than shrunk, and the reasons are returned — " +
+        "do not retry a refused request with a smaller size unless the user asks you to.",
+      inputSchema: {
+        botId: z.number().int().positive().describe("Bot supplying the exchange account and default symbol"),
+        symbol: z.string().optional().describe("Defaults to the bot's own symbol"),
+        side: z.enum(["buy", "sell"]),
+        quantity: z.number().positive().optional().describe("Size in base currency, e.g. 0.01 BTC"),
+        quoteAmount: z.number().positive().optional().describe("Size in quote currency, e.g. 50 USDT"),
+        orderType: z.enum(["market", "limit"]).optional().describe("Defaults to market"),
+        price: z.number().positive().optional().describe("Required for a limit entry"),
+        takeProfitPrice: z.number().positive().optional().describe("Optional resting exit once the entry fills"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        return ok(await mutate(config, "smartTrade.open", { ...args, orderType: args.orderType ?? "market" }));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "close_all_deals",
     {
       title: "Panic close every deal on every bot",

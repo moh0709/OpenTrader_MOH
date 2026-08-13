@@ -36,3 +36,5 @@ export {
   type PurgeResult,
   type SetLimitsResult,
 } from "./processing/executors/purge-bot.js";
+export { openSmartTrade, manualLimitsFromEnv, manualNotionalToday, openManualPositions } from "./trade-opener.js";
+export type { OpenTradeParams, OpenTradeResult, ManualTradeLimits } from "./trade-opener.js";

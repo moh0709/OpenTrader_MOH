@@ -23,10 +23,36 @@ export type CloseTradeResult = {
   message: string;
 };
 
+export type OpenTradeParams = {
+  botId: number;
+  symbol?: string;
+  side: "buy" | "sell";
+  quantity?: number;
+  quoteAmount?: number;
+  orderType: "market" | "limit";
+  price?: number;
+  takeProfitPrice?: number;
+};
+
+export type OpenTradeResult = {
+  ok: boolean;
+  smartTradeId?: number;
+  symbol?: string;
+  side?: string;
+  quantity?: number;
+  orderType?: string;
+  price?: number | null;
+  notionalQuote?: number;
+  rejections: string[];
+  message: string;
+};
+
 export type TradeOps = {
   closeSmartTrade: (id: number, mode?: CloseMode) => Promise<CloseTradeResult>;
   closeBotTrades: (botId: number, mode?: CloseMode) => Promise<CloseTradeResult[]>;
   closeAllTrades: (mode?: CloseMode) => Promise<CloseTradeResult[]>;
+  /** Force-open a deal, bypassing strategy. Enforces its own hard limits. */
+  openSmartTrade: (params: OpenTradeParams) => Promise<OpenTradeResult>;
 };
 
 let registered: TradeOps | null = null;
