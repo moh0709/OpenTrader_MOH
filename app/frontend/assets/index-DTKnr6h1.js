@@ -236626,7 +236626,7 @@ function jC(c) {
   const { entryOrder: e, takeProfitOrder: t } = c,
     { quantity: s } = t,
     i = Mu(t.filledPrice).minus(e.filledPrice).times(s).toNumber(),
-    n = Mu(e.fee ?? 0).times(e.filledPrice),
+    n = Mu(e.fee ?? 0),
     r = t.fee ?? 0,
     a = Mu(n).plus(r).toNumber(),
     o = Mu(i).minus(a).toNumber();

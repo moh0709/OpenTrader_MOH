@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="/favicon.ico" />
+    <title>OpenTrader Analytics</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app" hidden>
+      <header class="topbar">
+        <div class="topbar__left">
+          <!-- The dashboard is a separate document, so there is no in-app route
+               back to the bot list. This is the way home on every screen size. -->
+          <a class="btn btn--back" href="/" title="Back to bots">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn__label">Bots</span>
+          </a>
+
+          <span class="brand">
+            <span class="brand__mark" aria-hidden="true"></span>
+            <span class="brand__text">Analytics</span>
+          </span>
+
+          <button type="button" class="health-pill" data-health-pill aria-live="polite">
+            <span class="health-pill__dot" aria-hidden="true"></span>
+            <span data-health-pill-text>Checking…</span>
+          </button>
+        </div>
+
+        <div class="topbar__hero">
+          <span class="topbar__hero-label">Total P&amp;L</span>
+          <strong class="topbar__hero-value" data-hero-pnl>—</strong>
+          <span class="topbar__hero-meta" data-hero-meta></span>
+        </div>
+
+        <div class="topbar__right">
+          <div class="refresh" role="group" aria-label="Refresh">
+            <span class="refresh__status" data-refresh-status title="Time since last update">—</span>
+            <select class="select select--compact" data-refresh-select aria-label="Refresh interval">
+              <option value="0">Paused</option>
+              <option value="1000">1s</option>
+              <option value="2000">2s</option>
+              <option value="5000" selected>5s</option>
+              <option value="10000">10s</option>
+              <option value="30000">30s</option>
+              <option value="60000">60s</option>
+            </select>
+            <button type="button" class="btn btn--icon" data-refresh-now title="Refresh now" aria-label="Refresh now">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+
+          <button type="button" class="btn" data-open-share title="Share a read-only live feed">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M11 5.5a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6ZM5 9.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6Zm6 4.3a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6ZM6.6 7.1l2.8-1.6M6.6 8.9l2.8 1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+            <span class="btn__label">Share</span>
+          </button>
+          <button type="button" class="btn btn--primary" data-open-catalog title="Add widget">
+            <span aria-hidden="true">+</span><span class="btn__label">Add widget</span>
+          </button>
+          <button type="button" class="btn btn--icon" data-open-settings title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 1.5v1.7M8 12.8v1.7M14.5 8h-1.7M3.2 8H1.5M12.6 3.4l-1.2 1.2M4.6 11.4l-1.2 1.2M12.6 12.6l-1.2-1.2M4.6 4.6L3.4 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button type="button" class="btn btn--icon" data-toggle-theme title="Toggle theme" aria-label="Toggle theme">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="banner" data-banner hidden></div>
+
+      <main class="grid" data-grid aria-label="Dashboard widgets"></main>
+
+      <p class="empty-state" data-empty hidden>
+        No widgets on the board. Use <strong>Add widget</strong> to build your view.
+      </p>
+    </div>
+
+    <!-- Login, shown when no admin password is stored for this origin. -->
+    <div id="login" class="login" hidden>
+      <form class="login__card" data-login-form>
+        <h1 class="login__title">OpenTrader Analytics</h1>
+        <p class="login__text">Enter the admin password to view this dashboard.</p>
+        <input
+          class="input"
+          type="password"
+          name="password"
+          autocomplete="current-password"
+          placeholder="Admin password"
+          aria-label="Admin password"
+          required
+        />
+        <p class="login__error" data-login-error hidden></p>
+        <button class="btn btn--primary btn--block" type="submit">Unlock</button>
+      </form>
+    </div>
+
+    <!-- The lower third: open trades, one at a time. Sits outside [data-grid]
+         so it is page furniture rather than a widget - it must not be
+         removable, resizable or reorderable, and it shows on a shared feed
+         where there are no widgets at all. -->
+    <div class="ticker" data-ticker hidden>
+      <span class="ticker__tag">LIVE TRADES</span>
+      <button class="ticker__nav" type="button" data-ticker-prev aria-label="Previous trade" title="Previous trade">&#9664;</button>
+      <div class="ticker__view">
+        <div class="ticker__item" data-ticker-item></div>
+      </div>
+      <button class="ticker__nav" type="button" data-ticker-next aria-label="Next trade" title="Next trade">&#9654;</button>
+      <span class="ticker__count" data-ticker-count></span>
+    </div>
+
+    <div class="toasts" data-toasts aria-live="polite" aria-atomic="false"></div>
+    <!-- Alerts that must be acknowledged rather than watched go top right and
+         stay until dismissed. -->
+    <div class="toasts toasts--alerts" data-toasts-alerts role="alert" aria-live="assertive"></div>
+
+    <div class="drawer" data-catalog hidden>
+      <div class="drawer__scrim" data-catalog-close></div>
+      <aside class="drawer__panel" role="dialog" aria-label="Add widget">
+        <header class="drawer__head">
+          <h2>Add widget</h2>
+          <button type="button" class="btn btn--icon" data-catalog-close aria-label="Close">✕</button>
+        </header>
+        <div class="drawer__body" data-catalog-body></div>
+      </aside>
+    </div>
+
+    <div class="drawer" data-share hidden>
+      <div class="drawer__scrim" data-share-close></div>
+      <aside class="drawer__panel" role="dialog" aria-label="Share">
+        <header class="drawer__head">
+          <h2>Share</h2>
+          <button type="button" class="btn btn--icon" data-share-close aria-label="Close">✕</button>
+        </header>
+        <div class="drawer__body" data-share-body></div>
+      </aside>
+    </div>
+
+    <div class="drawer" data-settings hidden>
+      <div class="drawer__scrim" data-settings-close></div>
+      <aside class="drawer__panel" role="dialog" aria-label="Settings">
+        <header class="drawer__head">
+          <h2>Settings</h2>
+          <button type="button" class="btn btn--icon" data-settings-close aria-label="Close">✕</button>
+        </header>
+        <div class="drawer__body" data-settings-body></div>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

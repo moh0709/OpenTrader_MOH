@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { ExchangeClosedByUser, NetworkError, RequestTimeout } from "ccxt";
+import { ExchangeClosedByUser, NetworkError, NotSupported, RequestTimeout } from "ccxt";
 import type { IExchange } from "@opentrader/exchanges";
 import { logger } from "@opentrader/logger";
 import { barSizeToDuration } from "@opentrader/tools";
@@ -73,6 +73,12 @@ export class CandlesChannel extends EventEmitter {
             `[CandlesChannel] ${err.name} occurred in ${this.exchange.exchangeCode}:${this.symbol}:  ${err.message}. Reconnecting in 3s…`,
           );
           await new Promise((resolve) => setTimeout(resolve, 3000)); // prevents infinite loop
+        } else if (err instanceof NotSupported) {
+          logger.warn(
+            `[CandlesChannel] Candle streaming is unavailable for ${this.exchange.exchangeCode}:${this.symbol}. Falling back to REST polling.`,
+          );
+          await this.pollCandles();
+          return;
         } else if (err instanceof ExchangeClosedByUser) {
           logger.info(`[CandlesChannel] ExchangeClosedByUser: ${this.exchange.exchangeCode}:${this.symbol}`); // expected error when shutting down the platform
 
@@ -91,9 +97,31 @@ export class CandlesChannel extends EventEmitter {
     }
   }
 
+  private async pollCandles() {
+    while (this.enabled) {
+      try {
+        const since = this.bucket[this.bucket.length - 1]?.timestamp;
+        const candles = await this.exchange.getCandlesticks({
+          symbol: this.symbol,
+          bar: BarSize.ONE_MINUTE,
+          since,
+        });
+
+        for (const candle of candles) {
+          this.handleCandle(candle);
+        }
+      } catch (err) {
+        logger.error(err, `[CandlesChannel] Failed to poll candles for ${this.exchange.exchangeCode}:${this.symbol}.`);
+      }
+
+      if (this.enabled) {
+        await new Promise((resolve) => setTimeout(resolve, 15000));
+      }
+    }
+  }
+
   private handleCandle(candle: ICandlestick) {
     if (!this.enabled) return;
-
     const lastCandle = this.bucket[this.bucket.length - 1];
     if (candle.timestamp < lastCandle?.timestamp) return;
 
@@ -162,8 +190,9 @@ export class CandlesChannel extends EventEmitter {
    * from the previous day and aggregate them into a single 1-day candle.
    */
   private async downloadLastCandle() {
-    let since = getLastClosedCandleTimestamp(this.bucketSize);
+    let since = getLastClosedCandleTimestamp(this.bucketSize) - this.bucketSize * 60000;
     let minuteCandles: ICandlestick[] = [];
+    const latestClosedCandleTimestamp = Math.floor(Date.now() / 60000) * 60000 - 60000;
     let done = false;
 
     logger.debug(
@@ -171,11 +200,13 @@ export class CandlesChannel extends EventEmitter {
     );
 
     while (!done) {
-      const candles = await this.exchange.getCandlesticks({
-        symbol: this.symbol,
-        bar: BarSize.ONE_MINUTE,
-        since,
-      });
+      const candles = (
+        await this.exchange.getCandlesticks({
+          symbol: this.symbol,
+          bar: BarSize.ONE_MINUTE,
+          since,
+        })
+      ).filter((candle) => candle.timestamp <= latestClosedCandleTimestamp);
       logger.debug(
         `[${this.symbol}#${this.timeframe}] Fetched ${candles.length} candle(s) since ${new Date(since).toISOString()}.`,
       );
@@ -187,13 +218,19 @@ export class CandlesChannel extends EventEmitter {
 
       minuteCandles = minuteCandles.concat(candles);
 
+      const lastCandle = candles[candles.length - 1];
+      if (lastCandle.timestamp >= latestClosedCandleTimestamp) {
+        done = true;
+        continue;
+      }
+
       since = candles[candles.length - 1].timestamp + 60000;
     }
     logger.debug(
       `[${this.symbol}#${this.timeframe}] Fetched in total ${minuteCandles.length} candles since ${new Date(since).toISOString()}`,
     );
 
-    this.bucket = minuteCandles;
+    this.bucket = this.fillMissingCandles(minuteCandles);
     while (this.bucket.length >= this.bucketSize + 1) {
       const candle = this.aggregate();
       this.candlesHistory.push(candle);
@@ -222,6 +259,7 @@ export class CandlesChannel extends EventEmitter {
     }
 
     minuteCandles = minuteCandles.filter((candle) => candle.timestamp < historyCandle.timestamp);
+    minuteCandles = this.fillMissingCandles(minuteCandles);
 
     const aggregatedCandles: ICandlestick[] = [];
     while (minuteCandles.length >= this.bucketSize) {
@@ -236,6 +274,42 @@ export class CandlesChannel extends EventEmitter {
     logger.info(
       `[${this.symbol}#${this.timeframe}] Warming up completed. Aggregated ${aggregatedCandles.length} candles from ${firstCandle ? new Date(firstCandle.timestamp).toISOString() : null} to ${lastCandle ? new Date(lastCandle.timestamp).toISOString() : null}`,
     );
+  }
+
+  private fillMissingCandles(candles: ICandlestick[]): ICandlestick[] {
+    const sortedCandles = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+    const filledCandles: ICandlestick[] = [];
+
+    for (const candle of sortedCandles) {
+      const previousCandle = filledCandles[filledCandles.length - 1];
+
+      if (!previousCandle) {
+        filledCandles.push(candle);
+        continue;
+      }
+
+      if (candle.timestamp <= previousCandle.timestamp) {
+        if (candle.timestamp === previousCandle.timestamp) {
+          filledCandles[filledCandles.length - 1] = candle;
+        }
+        continue;
+      }
+
+      for (let timestamp = previousCandle.timestamp + 60000; timestamp < candle.timestamp; timestamp += 60000) {
+        filledCandles.push({
+          timestamp,
+          open: previousCandle.close,
+          high: previousCandle.close,
+          low: previousCandle.close,
+          close: previousCandle.close,
+          volume: 0,
+        });
+      }
+
+      filledCandles.push(candle);
+    }
+
+    return filledCandles;
   }
 
   get isDemoAccount() {

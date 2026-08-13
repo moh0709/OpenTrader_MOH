@@ -90,33 +90,33 @@ export class PaperExchange extends CCXTExchange {
             continue;
           }
 
-          if (order.side === "buy" && order.price! >= ticker.ask!) {
+          if (order.side === "buy" && order.price! >= (ticker.ask ?? ticker.last)!) {
             const filledOrder = await xprisma.paperOrder.update({
               where: { id: order.id },
               data: {
                 status: "filled" satisfies OrderStatus,
-                filledPrice: ticker.ask,
+                filledPrice: ticker.ask ?? ticker.last,
                 lastTradeTimestamp: new Date(),
               },
             });
             this.openOrders = this.openOrders.filter((openOrder) => openOrder.id !== order.id); // remove from open orders
             console.log(
-              `[${this.exchangeCode} Paper] BUY order ID:${order.id} filled at price ${ticker.ask} ${order.symbol}`,
+              `[${this.exchangeCode} Paper] BUY order ID:${order.id} filled at price ${ticker.ask ?? ticker.last} ${order.symbol}`,
             );
 
             this.emitOrder(filledOrder);
-          } else if (order.side === "sell" && order.price! <= ticker.bid!) {
+          } else if (order.side === "sell" && order.price! <= (ticker.bid ?? ticker.last)!) {
             const filledOrder = await xprisma.paperOrder.update({
               where: { id: order.id },
               data: {
                 status: "filled" satisfies OrderStatus,
-                filledPrice: ticker.bid,
+                filledPrice: ticker.bid ?? ticker.last,
                 lastTradeTimestamp: new Date(),
               },
             });
             this.openOrders = this.openOrders.filter((openOrder) => openOrder.id !== order.id); // remove from open orders
             console.log(
-              `[${this.exchangeCode} Paper] SELL order ID:${order.id} filled at price ${ticker.bid} ${order.symbol}`,
+              `[${this.exchangeCode} Paper] SELL order ID:${order.id} filled at price ${ticker.bid ?? ticker.last} ${order.symbol}`,
             );
 
             this.emitOrder(filledOrder);

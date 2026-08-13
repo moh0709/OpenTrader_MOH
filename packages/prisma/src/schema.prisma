@@ -146,6 +146,9 @@ model SmartTrade {
   bot   Bot? @relation(fields: [botId], references: [id], onDelete: Cascade)
   botId Int?
 
+  @@index([botId])
+  @@index([ref])
+
   owner   User @relation(fields: [ownerId], references: [id])
   ownerId Int
 
@@ -173,6 +176,10 @@ model Order {
   quantity     Float
   smartTrade   SmartTrade @relation(fields: [smartTradeId], references: [id], onDelete: Cascade)
   smartTradeId Int
+
+  // Every read of a trade fetches its orders; without this it is a table scan.
+  @@index([smartTradeId])
+  @@index([status, entityType])
 
   createdAt DateTime  @default(now())
   placedAt  DateTime?
@@ -207,6 +214,13 @@ model Bot {
 
   createdAt DateTime @default(now())
 
+  /// Maximum quote-currency capital this bot may have committed at once.
+  /// Null or zero means no cap. Enforced where entry orders are placed.
+  maxCapital Float?
+  /// Minimum quote-currency profit a cycle must make. A take profit that would
+  /// earn less is lifted to the price that meets this. Null or zero means none.
+  minProfit  Float?
+
   settings String // JSON stringified
   state    String @default("{}") // JSON stringified
 
@@ -235,6 +249,11 @@ model BotLog {
   createdAt        DateTime @default(now())
   bot              Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
   botId            Int
+
+  // This table grows fastest and is queried by bot and by recency. Without an
+  // index both are full scans of a table that reached 729 MB on one install.
+  @@index([botId, createdAt])
+  @@index([createdAt])
 }
 
 model Markets {
@@ -260,4 +279,34 @@ model PaperOrder {
   status             String   @default("open") // OrderStatus
   fee                Float    @default(0)
   createdAt          DateTime @default(now())
+}
+
+/// A read-only, single-device live view of the analytics, granted to one named
+/// person until a date the owner chooses. The token is derived from the
+/// recipient's email and name, so each person has exactly one link.
+model ShareLink {
+  id    Int    @id @default(autoincrement())
+  token String @unique
+
+  name  String
+  email String
+
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  /// The first device to open the link claims it. Anyone else is refused.
+  /// Cleared by the owner to let the recipient move to another device.
+  deviceId  String?
+  claimedAt DateTime?
+
+  /// Refreshed on every heartbeat; drives the presence indicator.
+  lastSeenAt DateTime?
+
+  emailSentAt DateTime?
+  emailError  String?
+
+  /// One link per recipient: the address and name are the identity.
+  @@unique([email, name])
+  @@index([lastSeenAt])
 }

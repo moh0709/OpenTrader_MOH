@@ -34,3 +34,9 @@ tsconfig.tsbuildinfo
 
 # Local isolated development worktrees
 .worktrees/
+
+# Build backups created during manual deploys
+app/dist.bak-*
+*.bak-*
+# Stray empty DB created by running the CLI from the repo root
+/opentrader.db

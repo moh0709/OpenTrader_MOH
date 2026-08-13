@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="/opt/data/home/.proto/tools/node/22.12.0/bin:/opt/data/pnpm/bin:$PATH"
+export NODE_ENV=production
+export DATABASE_URL="file:/opt/data/home/.opentrader/opentrader.db"
+exec node /opt/data/opentrader/app/dist/cli.mjs "$@"

@@ -1,0 +1,673 @@
+/*
+ * OpenTrader Analytics dashboard.
+ *
+ * Colours come from the validated data-visualisation palette: categorical slots
+ * 1-3 (blue, orange, aqua) which clear every all-pairs colourblind gate in both
+ * modes, a single-hue blue sequential ramp for magnitude, and the reserved
+ * status palette for good/warning/serious/critical. Profit and loss are drawn
+ * with status colours and are ALWAYS accompanied by a sign or a word, so the
+ * meaning never rests on hue alone.
+ */
+
+:root {
+  color-scheme: light;
+
+  --surface-1: #fcfcfb;
+  --surface-2: #f4f4f1;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.05), 0 4px 16px rgba(11, 11, 11, 0.06);
+
+  /* Categorical - fixed order, never cycled. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+
+  /* Sequential, one hue light to dark. */
+  --seq-100: #cde2fb;
+  --seq-250: #86b6ef;
+  --seq-400: #3987e5;
+  --seq-550: #1c5cab;
+  --seq-700: #0d366b;
+
+  /* Status - reserved, never reused as a series. */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --good-text: #006300;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --gap: 14px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --surface-1: #1a1a19;
+    --surface-2: #211f1f;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+
+    --seq-100: #184f95;
+    --seq-250: #256abf;
+    --seq-400: #3987e5;
+    --seq-550: #86b6ef;
+    --seq-700: #cde2fb;
+
+    --good-text: #0ca30c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-1: #1a1a19;
+  --surface-2: #211f1f;
+  --page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+
+  --seq-100: #184f95;
+  --seq-250: #256abf;
+  --seq-400: #3987e5;
+  --seq-550: #86b6ef;
+  --seq-700: #cde2fb;
+
+  --good-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+
+/*
+ * An author `display` beats the user-agent rule for [hidden], so any element
+ * given a display value here would stay on screen while marked hidden. The
+ * login overlay hit exactly that. Make hidden authoritative.
+ */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+button, input, select { font: inherit; color: inherit; }
+
+/* ---------- Top bar ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 18px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar__left, .topbar__right { display: flex; align-items: center; gap: 10px; }
+.topbar__right { margin-left: auto; }
+
+.brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text-primary); }
+
+/* Back to the bot list. Keeps its label on wide screens and collapses to the
+   chevron on narrow ones, where header space is the scarce thing. */
+.btn--back { text-decoration: none; padding-inline: 8px 10px; gap: 4px; flex: none; }
+.btn--back svg { flex: none; }
+.brand__mark {
+  width: 20px; height: 20px; border-radius: 6px;
+  background: linear-gradient(135deg, var(--series-1), var(--series-3));
+}
+.brand__text { font-weight: 600; letter-spacing: -0.01em; }
+
+.topbar__hero { display: flex; align-items: baseline; gap: 10px; }
+.topbar__hero-label { color: var(--text-muted); font-size: 12px; }
+/* Hero figure: proportional figures, same sans as everything else. */
+.topbar__hero-value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.topbar__hero-meta { color: var(--text-secondary); font-size: 12px; }
+
+.health-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 4px 11px 4px 9px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--text-secondary);
+  font-size: 12px; cursor: pointer;
+}
+.health-pill:hover { border-color: var(--baseline); }
+.health-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+.health-pill[data-status="ok"] .health-pill__dot { background: var(--good); }
+.health-pill[data-status="warn"] .health-pill__dot { background: var(--warning); }
+.health-pill[data-status="crit"] .health-pill__dot { background: var(--critical); }
+.health-pill[data-status="crit"] { color: var(--critical); border-color: var(--critical); }
+
+.refresh { display: flex; align-items: center; gap: 6px; }
+.refresh__status { color: var(--text-muted); font-size: 12px; min-width: 62px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- Controls ---------- */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-primary);
+  font-size: 13px; cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+.btn:hover { border-color: var(--baseline); }
+.btn:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+.btn--primary { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+.btn--primary:hover { filter: brightness(1.08); }
+.btn--icon { padding: 6px; width: 30px; height: 30px; }
+.btn--block { width: 100%; padding: 9px; }
+.btn--danger { color: var(--critical); }
+.btn--sm { padding: 3px 8px; font-size: 12px; }
+
+.select, .input {
+  padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); font-size: 13px;
+}
+.select--compact { padding: 4px 6px; font-size: 12px; }
+.input { width: 100%; padding: 9px 11px; }
+.input:focus-visible, .select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+
+/* ---------- Widget grid ---------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--gap);
+  padding: var(--gap) 18px 60px;
+  align-items: start;
+}
+
+.widget {
+  grid-column: span var(--w, 4);
+  display: flex; flex-direction: column;
+  min-width: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  position: relative;
+}
+.widget[data-height="fixed"] { height: calc(var(--h, 2) * 132px); }
+.widget--dragging { opacity: 0.45; }
+.widget--drop-target { outline: 2px dashed var(--series-1); outline-offset: 2px; }
+/* Hold the previous render while refetching - no skeleton, no layout jump. */
+.widget--stale .widget__body { opacity: 0.55; transition: opacity 160ms; }
+
+.widget__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  cursor: grab;
+  flex: none;
+}
+.widget__head:active { cursor: grabbing; }
+.widget__title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.widget__meta { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.widget__tools { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.widget__tool {
+  border: 0; background: transparent; color: var(--text-muted);
+  cursor: pointer; padding: 3px 5px; border-radius: 4px; font-size: 12px; line-height: 1;
+}
+.widget__tool:hover { background: var(--surface-2); color: var(--text-primary); }
+.widget__body { padding: 12px; overflow: auto; flex: 1 1 auto; min-height: 0; }
+.widget__resize {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; opacity: 0.5;
+  background:
+    linear-gradient(135deg, transparent 0 50%, var(--baseline) 50% 60%, transparent 60% 70%, var(--baseline) 70% 80%, transparent 80%);
+}
+.widget__resize:hover { opacity: 1; }
+
+.empty-state { text-align: center; color: var(--text-muted); padding: 60px 20px; }
+
+/* ---------- Shared widget pieces ---------- */
+
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.stat {
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.stat__label { color: var(--text-muted); font-size: 11px; margin-bottom: 3px; }
+/* Proportional figures: tabular-nums makes standalone values look loose. */
+.stat__value { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+.stat__meta { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+.stat__spark { margin-top: 6px; height: 22px; }
+
+.pos { color: var(--good-text); }
+.neg { color: var(--critical); }
+.flat { color: var(--text-secondary); }
+
+.table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.table th, .table td { padding: 6px 8px; text-align: right; white-space: nowrap; }
+.table th:first-child, .table td:first-child { text-align: left; }
+.table th {
+  color: var(--text-muted); font-weight: 500; font-size: 11px;
+  border-bottom: 1px solid var(--gridline);
+  position: sticky; top: 0; background: var(--surface-1); z-index: 1;
+}
+.table td { border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; }
+.table tbody tr:hover td { background: var(--surface-2); }
+.table th[data-sort] { cursor: pointer; user-select: none; }
+.table th[data-sort]:hover { color: var(--text-primary); }
+.table__name { font-variant-numeric: normal; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; white-space: nowrap;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary);
+}
+.badge--win { color: var(--good-text); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.badge--loss { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
+.badge--warn { color: var(--serious); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.badge--info { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 40%, transparent); }
+
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.toolbar__spacer { margin-left: auto; }
+
+.note {
+  padding: 8px 10px; margin-bottom: 10px;
+  border-left: 2px solid var(--series-1); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--surface-2); color: var(--text-secondary); font-size: 12px;
+}
+.note--warn { border-left-color: var(--warning); }
+
+/* Presence: a live green LED beside the watcher's name. */
+.watcher {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 8px 1px 6px; margin-left: 6px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--text-secondary);
+  font-size: 11px; white-space: nowrap; vertical-align: middle;
+}
+.led {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--good);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 25%, transparent);
+  animation: led-pulse 2s ease-in-out infinite;
+}
+@keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.watchers { display: inline-flex; flex-wrap: wrap; gap: 2px; }
+
+.muted { color: var(--text-muted); }
+.small { font-size: 12px; }
+.nowrap { white-space: nowrap; }
+.empty { color: var(--text-muted); text-align: center; padding: 26px 10px; font-size: 13px; }
+
+/* ---------- Charts ---------- */
+
+.chart { width: 100%; display: block; overflow: visible; }
+.chart text { font-family: var(--font); }
+.chart__grid line { stroke: var(--gridline); stroke-width: 1; }
+.chart__axis line { stroke: var(--baseline); stroke-width: 1; }
+.chart__tick { fill: var(--text-muted); font-size: 10px; }
+.chart__label { fill: var(--text-secondary); font-size: 11px; }
+.chart__hit { fill: transparent; cursor: crosshair; }
+.chart__mark:hover { filter: brightness(1.12); }
+.chart__crosshair { stroke: var(--baseline); stroke-width: 1; pointer-events: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 11.5px; color: var(--text-secondary); }
+.legend__item { display: inline-flex; align-items: center; gap: 6px; }
+.legend__swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.legend__line { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+
+.tooltip {
+  position: fixed; z-index: 60; pointer-events: none;
+  padding: 7px 9px; max-width: 260px;
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); font-size: 12px;
+}
+.tooltip__title { color: var(--text-secondary); font-size: 11px; margin-bottom: 3px; }
+.tooltip__row { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.tooltip__key { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); }
+.tooltip__value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---------- Grid ladder ---------- */
+
+.ladder { display: flex; flex-direction: column; gap: 2px; }
+.ladder__row {
+  /* The state column sizes to its badges: a fixed width clipped "4 holding" to "ing". */
+  display: grid; grid-template-columns: 72px minmax(40px, 1fr) auto;
+  align-items: center; gap: 8px;
+  padding: 2px 0; font-size: 12px;
+}
+.ladder__price { font-variant-numeric: tabular-nums; color: var(--text-secondary); text-align: right; }
+.ladder__track { position: relative; height: 16px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.ladder__fill { position: absolute; inset-block: 0; left: 0; border-radius: 3px 0 0 3px; }
+.ladder__value {
+  position: absolute; top: 0; line-height: 16px;
+  color: var(--text-secondary); font-size: 10.5px; white-space: nowrap;
+}
+.ladder__state { display: flex; gap: 4px; align-items: center; justify-content: flex-end; white-space: nowrap; }
+.ladder__marker {
+  display: grid; grid-template-columns: 72px minmax(40px, 1fr) auto; align-items: center; gap: 8px;
+  margin: 3px 0; font-size: 11px; color: var(--series-2); font-weight: 600;
+}
+.ladder__marker-line { height: 0; border-top: 2px dashed var(--series-2); }
+
+/* ---------- Health ---------- */
+
+.check {
+  display: grid; grid-template-columns: 10px 1fr auto;
+  gap: 9px; align-items: baseline;
+  padding: 7px 0; border-bottom: 1px solid var(--gridline);
+}
+.check:last-child { border-bottom: 0; }
+.check__dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+.check__dot[data-status="ok"] { background: var(--good); }
+.check__dot[data-status="warn"] { background: var(--warning); }
+.check__dot[data-status="crit"] { background: var(--critical); }
+.check__dot[data-status="unknown"] { background: var(--text-muted); }
+.check__label { font-size: 12.5px; }
+.check__detail { color: var(--text-muted); font-size: 11.5px; margin-top: 2px; line-height: 1.4; }
+.check__value { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+.check__group { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin: 12px 0 2px; }
+.check__group:first-child { margin-top: 0; }
+
+/* ---------- Event feed ---------- */
+
+.feed { display: flex; flex-direction: column; gap: 1px; }
+.feed__item { display: grid; grid-template-columns: 3px 1fr auto; gap: 9px; padding: 6px 0; align-items: baseline; }
+.feed__bar { width: 3px; border-radius: 2px; align-self: stretch; background: var(--text-muted); }
+.feed__item[data-severity="success"] .feed__bar { background: var(--good); }
+.feed__item[data-severity="danger"] .feed__bar { background: var(--critical); }
+.feed__item[data-severity="warning"] .feed__bar { background: var(--warning); }
+.feed__item[data-severity="info"] .feed__bar { background: var(--series-1); }
+.feed__title { font-size: 12.5px; font-weight: 500; }
+.feed__msg { color: var(--text-secondary); font-size: 11.5px; }
+.feed__time { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+
+/* ---------- Toasts ---------- */
+
+.toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 80;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: min(360px, calc(100vw - 32px));
+}
+.toasts--alerts { top: 16px; bottom: auto; right: 16px; }
+.toast--sticky { border-color: var(--critical); box-shadow: 0 2px 20px rgba(208, 59, 59, 0.25), var(--shadow); }
+.toast--sticky .toast__title { color: var(--critical); }
+.toast__hint { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+
+.toast {
+  display: grid; grid-template-columns: 3px 1fr auto; gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  animation: toast-in 180ms ease-out;
+}
+.toast--out { animation: toast-out 160ms ease-in forwards; }
+.toast__bar { width: 3px; border-radius: 2px; background: var(--text-muted); }
+.toast[data-severity="success"] .toast__bar { background: var(--good); }
+.toast[data-severity="danger"] .toast__bar { background: var(--critical); }
+.toast[data-severity="warning"] .toast__bar { background: var(--warning); }
+.toast[data-severity="info"] .toast__bar { background: var(--series-1); }
+.toast__title { font-size: 12.5px; font-weight: 600; }
+.toast__msg { color: var(--text-secondary); font-size: 12px; margin-top: 1px; }
+.toast__close { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 13px; align-self: start; }
+
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateX(12px); } }
+
+/* ---------- Drawers ---------- */
+
+.drawer { position: fixed; inset: 0; z-index: 70; }
+.drawer__scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.35); }
+.drawer__panel {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: min(420px, 100vw);
+  display: flex; flex-direction: column;
+  background: var(--surface-1); border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  animation: drawer-in 180ms ease-out;
+}
+@keyframes drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.drawer__head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.drawer__head h2 { font-size: 14px; }
+.drawer__body { padding: 14px; overflow: auto; }
+
+.catalog__group { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 6px; }
+.catalog__group:first-child { margin-top: 0; }
+.catalog__item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%;
+  padding: 9px 10px; margin-bottom: 5px; text-align: left;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); cursor: pointer;
+}
+.catalog__item:hover { border-color: var(--series-1); }
+.catalog__item[data-active="true"] { border-color: var(--series-1); }
+.catalog__name { font-size: 13px; font-weight: 500; }
+.catalog__desc { color: var(--text-muted); font-size: 11.5px; margin-top: 1px; line-height: 1.4; }
+.catalog__count { margin-left: auto; color: var(--series-1); font-size: 11px; white-space: nowrap; }
+
+.field { margin-bottom: 14px; }
+.field__label { display: block; font-size: 12.5px; font-weight: 500; margin-bottom: 4px; }
+.field__hint { color: var(--text-muted); font-size: 11.5px; margin-top: 3px; line-height: 1.4; }
+.field__row { display: flex; align-items: center; gap: 8px; }
+.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.section-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 18px 0 8px; }
+.section-title:first-child { margin-top: 0; }
+
+/* ---------- Login ---------- */
+
+.login { position: fixed; inset: 0; display: grid; place-items: center; background: var(--page); z-index: 90; padding: 20px; }
+.login__card {
+  width: min(340px, 100%); padding: 22px;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.login__title { font-size: 16px; margin-bottom: 4px; }
+.login__text { color: var(--text-secondary); font-size: 12.5px; margin: 0 0 14px; }
+.login__error { color: var(--critical); font-size: 12px; margin: 8px 0 0; }
+.login__card .btn { margin-top: 12px; }
+
+.banner {
+  margin: var(--gap) 18px 0; padding: 9px 12px;
+  border: 1px solid var(--border); border-left: 2px solid var(--critical);
+  border-radius: var(--radius-sm); background: var(--surface-1);
+  color: var(--text-secondary); font-size: 12.5px;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 1100px) {
+  .widget { grid-column: span min(var(--w, 4), 6); }
+  .topbar__hero { display: none; }
+}
+
+@media (max-width: 720px) {
+  .widget { grid-column: 1 / -1; }
+  .topbar { flex-wrap: wrap; gap: 8px 10px; padding: 8px 12px; }
+  .topbar__right { width: 100%; }
+  .grid { padding: var(--gap) 12px 60px; }
+
+  /* The chevron alone reads as "back"; the word costs room better spent on
+     the health pill and the refresh controls. */
+  .btn--back .btn__label { display: none; }
+  .btn--back { padding-inline: 7px; }
+  .brand__text { font-size: 13px; }
+  .refresh__status { min-width: 0; }
+  .btn--primary .btn__label { display: none; }
+  .btn--primary { padding-inline: 10px; font-size: 15px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ---------------------------------------------------------------------------
+   Lower third: open trades, one at a time, on a broadcast-yellow bar.
+
+   The yellow is deliberate and stays yellow in dark mode. It is a signal
+   colour, not a surface: the whole point is that it reads as a separate layer
+   over the dashboard the way a news channel's ticker sits over the picture.
+   Dark mode only takes it down a shade so it does not glare.
+
+   Everything on it is therefore coloured for yellow, not for the page. The
+   usual --good-text / --critical pair is tuned for a near-white or near-black
+   surface and drops to about 3:1 here; these two are darkened to clear 4.5:1
+   against the bar in both themes.
+--------------------------------------------------------------------------- */
+:root {
+  --ticker-bg: #f5c518;
+  --ticker-ink: #141310;
+  --ticker-up: #0a5230;
+  --ticker-down: #8f1010;
+  --ticker-h: 40px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --ticker-bg: #e0ae10; }
+}
+
+:root[data-theme="dark"] { --ticker-bg: #e0ae10; }
+
+.ticker {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+  display: flex; align-items: center; gap: 12px;
+  height: var(--ticker-h); padding: 0 12px;
+  background: var(--ticker-bg); color: var(--ticker-ink);
+  border-top: 1px solid rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.18);
+}
+
+.ticker[hidden] { display: none; }
+
+.ticker__tag {
+  flex: none;
+  padding: 4px 8px; border-radius: 3px;
+  background: var(--ticker-ink); color: var(--ticker-bg);
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+}
+
+/* The window the item slides into. Hides the item's starting offset. */
+.ticker__view { flex: 1; overflow: hidden; min-width: 0; }
+
+.ticker__item {
+  opacity: 0; transform: translateX(28px);
+  will-change: transform, opacity;
+}
+
+.ticker__item--in {
+  opacity: 1; transform: translateX(0);
+  transition: transform .45s cubic-bezier(.22, .61, .36, 1), opacity .45s ease;
+}
+
+/* One line, never wrapped: a half-visible second line reads as a glitch. */
+.ticker__line {
+  display: flex; align-items: center; gap: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.ticker__bot { font-weight: 700; }
+.ticker__sym { opacity: .8; }
+.ticker__status { font-weight: 700; letter-spacing: .04em; }
+.ticker__sep { opacity: .45; }
+.ticker__opened, .ticker__value { opacity: .85; }
+.ticker__pnl { font-weight: 700; }
+
+.ticker__line--up .ticker__pnl { color: var(--ticker-up); }
+.ticker__line--down .ticker__pnl { color: var(--ticker-down); }
+
+.ticker__count { flex: none; font-size: 11px; opacity: .7; font-variant-numeric: tabular-nums; }
+
+/* Keep the bar clear of the page's own furniture. */
+body:has(.ticker:not([hidden])) .grid { padding-bottom: calc(var(--ticker-h) + 16px); }
+body:has(.ticker:not([hidden])) .toasts { bottom: calc(var(--ticker-h) + 16px); }
+body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
+
+@media (max-width: 640px) {
+  .ticker { font-size: 12px; gap: 8px; }
+  .ticker__tag { font-size: 10px; padding: 3px 6px; }
+  /* On a phone the count is the first thing worth losing. */
+  .ticker__count { display: none; }
+}
+
+/* Respect a user who has asked for less motion: no slide, just a fade. */
+@media (prefers-reduced-motion: reduce) {
+  .ticker__item { transform: none; }
+  .ticker__item--in { transform: none; transition: opacity .3s ease; }
+}
+
+/* Manual take-over: step through trades by hand, and the bar resumes cycling
+   on its own once the buttons have been left alone. */
+.ticker__nav {
+  flex: none;
+  width: 26px; height: 26px; padding: 0;
+  display: grid; place-items: center;
+  font: inherit; font-size: 10px; line-height: 1;
+  color: var(--ticker-ink);
+  background: rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.28); border-radius: 4px;
+  cursor: pointer;
+}
+
+.ticker__nav:hover { background: rgba(0, 0, 0, 0.18); }
+.ticker__nav:active { transform: translateY(1px); }
+.ticker__nav:focus-visible { outline: 2px solid var(--ticker-ink); outline-offset: 1px; }
+
+/* The "now" figure, when it has risen since the last poll. Two beats and stop:
+   a permanent pulse becomes wallpaper and stops being noticed, which defeats
+   the point of using motion to draw the eye at all. */
+.ticker__value--rising {
+  color: var(--ticker-up); font-weight: 700;
+  border-radius: 3px;
+  animation: ticker-pulse .9s ease-out 2;
+}
+
+@keyframes ticker-pulse {
+  0%   { background: rgba(10, 82, 48, 0); box-shadow: 0 0 0 0 rgba(10, 82, 48, .55); }
+  35%  { background: rgba(10, 82, 48, .18); box-shadow: 0 0 0 5px rgba(10, 82, 48, 0); }
+  100% { background: rgba(10, 82, 48, 0); box-shadow: 0 0 0 0 rgba(10, 82, 48, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the colour and weight change, drop the movement. */
+  .ticker__value--rising { animation: none; background: rgba(10, 82, 48, .16); }
+}
