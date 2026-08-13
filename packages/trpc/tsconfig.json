@@ -4,6 +4,7 @@
     "baseUrl": ".",
     "outDir": "../../dts/packages/trpc",
     "paths": {
+      "@opentrader/arbitrage": ["../arbitrage/src/index.ts"],
       "@opentrader/bot-processor": ["../bot-processor/src/index.ts"],
       "@opentrader/bot-processor/*": ["../bot-processor/src/*"],
       "@opentrader/bot-templates": ["../bot-templates/src/index.ts"],
@@ -27,6 +28,9 @@
   },
   "include": ["src/**/*"],
   "references": [
+    {
+      "path": "../arbitrage"
+    },
     {
       "path": "../backtesting"
     },

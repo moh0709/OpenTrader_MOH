@@ -15,9 +15,29 @@
  * clone inherits whatever markup and styling that nav uses, so the item looks
  * native in both the bar and the drawer without knowing anything about either.
  */
-const MARK = "data-opentrader-analytics-link";
-const TARGET = "/analytics/";
-const LABEL = "Analytics";
+/**
+ * The links to install. Each is cloned from a real nav item, so it inherits the
+ * app's own markup and styling without this file knowing anything about either.
+ *
+ * `icon` receives the cloned <svg>, already emptied and sized, and draws into it
+ * with strokes so the glyph inherits the nav's colour.
+ */
+const LINKS = [
+  {
+    mark: "data-opentrader-analytics-link",
+    target: "/analytics/",
+    label: "Analytics",
+    // Three ascending bars.
+    icon: (svg) => bars(svg, [[6, 14], [12, 10], [18, 5]]),
+  },
+  {
+    mark: "data-opentrader-arbitrage-link",
+    target: "/analytics/#arbitrage",
+    label: "Arbitrage",
+    // Two opposed arrows: value moving between venues.
+    icon: (svg) => exchangeArrows(svg),
+  },
+];
 const NAV_ITEMS = ["Bots", "Strategies", "Exchange Accounts", "Settings"];
 
 /**
@@ -82,39 +102,45 @@ const SVG_NS = "http://www.w3.org/2000/svg";
  * element itself is reused so its sizing and classes stay untouched; only the
  * glyph inside changes.
  */
-function setIcon(link) {
+function stroke(svg, attrs) {
+  const line = document.createElementNS(SVG_NS, "line");
+  for (const [key, value] of Object.entries(attrs)) line.setAttribute(key, String(value));
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "2.2");
+  line.setAttribute("stroke-linecap", "round");
+  line.setAttribute("fill", "none");
+  svg.append(line);
+}
+
+/** Vertical bars rising to a baseline. */
+function bars(svg, points) {
+  for (const [x, y] of points) stroke(svg, { x1: x, x2: x, y1: y, y2: 19 });
+}
+
+/** Two arrows pointing opposite ways, one above the other. */
+function exchangeArrows(svg) {
+  stroke(svg, { x1: 4, x2: 19, y1: 9, y2: 9 });
+  stroke(svg, { x1: 15, x2: 19, y1: 5, y2: 9 });
+  stroke(svg, { x1: 20, x2: 5, y1: 15, y2: 15 });
+  stroke(svg, { x1: 9, x2: 5, y1: 19, y2: 15 });
+}
+
+function setIcon(link, draw) {
   const icon = link.querySelector("svg");
   if (!icon) return;
 
   while (icon.firstChild) icon.removeChild(icon.firstChild);
   icon.setAttribute("viewBox", "0 0 24 24");
-
-  // Three ascending bars, drawn as strokes so it inherits the nav's colour.
-  for (const [x, y] of [
-    [6, 14],
-    [12, 10],
-    [18, 5],
-  ]) {
-    const bar = document.createElementNS(SVG_NS, "line");
-    bar.setAttribute("x1", String(x));
-    bar.setAttribute("x2", String(x));
-    bar.setAttribute("y1", String(y));
-    bar.setAttribute("y2", "19");
-    bar.setAttribute("stroke", "currentColor");
-    bar.setAttribute("stroke-width", "2.2");
-    bar.setAttribute("stroke-linecap", "round");
-    bar.setAttribute("fill", "none");
-    icon.append(bar);
-  }
+  draw(icon);
 }
 
-function buildLink(container) {
+function buildLink(container, spec) {
   const template = templateItem(container);
   if (!template) return null;
 
   const link = template.cloneNode(true);
 
-  link.setAttribute(MARK, "");
+  link.setAttribute(spec.mark, "");
   // A clone of the current page would otherwise claim to be active too.
   link.removeAttribute("aria-current");
   link.removeAttribute("data-status");
@@ -124,11 +150,11 @@ function buildLink(container) {
 
   // The dashboard is a separate document, so this is a real navigation, not a
   // hash route the React router would try to handle.
-  if (link.tagName === "A") link.setAttribute("href", TARGET);
-  else link.addEventListener("click", () => (window.location.href = TARGET));
+  if (link.tagName === "A") link.setAttribute("href", spec.target);
+  else link.addEventListener("click", () => (window.location.href = spec.target));
 
-  setLabel(link, LABEL);
-  setIcon(link);
+  setLabel(link, spec.label);
+  setIcon(link, spec.icon);
 
   return link;
 }
@@ -137,13 +163,15 @@ export function attachLinks(doc = document) {
   let added = 0;
 
   for (const container of findNavContainers(doc)) {
-    if (container.querySelector(`[${MARK}]`)) continue;
+    for (const spec of LINKS) {
+      if (container.querySelector(`[${spec.mark}]`)) continue;
 
-    const link = buildLink(container);
-    if (!link) continue;
+      const link = buildLink(container, spec);
+      if (!link) continue;
 
-    container.append(link);
-    added += 1;
+      container.append(link);
+      added += 1;
+    }
   }
 
   return added;

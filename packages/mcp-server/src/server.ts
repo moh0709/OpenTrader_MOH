@@ -113,6 +113,40 @@ export function createServer(config: ClientConfig): McpServer {
     },
   );
 
+  server.registerTool(
+    "scan_arbitrage",
+    {
+      title: "Scan cross-venue arbitrage",
+      description:
+        "Compare live order books across exchanges for one symbol and report whether any route is actually " +
+        "profitable. Read-only — it places no orders. " +
+        "Each route reports two numbers: the top-of-book spread, and the spread that survives walking real " +
+        "order-book depth to the requested size and paying taker fees on both legs. Quote the second one. " +
+        "The first is almost always flattering and is how naive scanners report opportunities that lose money. " +
+        "On liquid pairs the honest answer is usually that no edge exists; say so plainly rather than " +
+        "presenting the top-of-book number as an opportunity.",
+      inputSchema: {
+        symbol: z.string().optional().describe("Market to scan, default BTC/USDT"),
+        tradeQty: z.number().positive().optional().describe("Base size to price the spread at, default 0.01"),
+        venues: z.array(z.string()).optional().describe("Exchange codes to compare; defaults to all supported"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol, tradeQty, venues }) => {
+      try {
+        return ok(
+          await query(config, "arbitrage.scan", {
+            symbol: symbol ?? "BTC/USDT",
+            tradeQty: tradeQty ?? 0.01,
+            ...(venues ? { venues } : {}),
+          }),
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
   // -------------------------------------------------------------- bot control
 
   server.registerTool(

@@ -10,6 +10,7 @@ import {
   orderRouter,
   exchangeRouter,
   dashboardRouter,
+  arbitrageRouter,
 } from "./private/router.js";
 import { publicRouter } from "./public/router.js";
 
@@ -24,6 +25,7 @@ export const appRouter = trpc.router({
   order: orderRouter,
   exchange: exchangeRouter,
   dashboard: dashboardRouter,
+  arbitrage: arbitrageRouter,
   public: publicRouter,
 });
 

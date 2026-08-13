@@ -85,6 +85,7 @@ describe.skipIf(!isBuilt)("MCP server over stdio", () => {
         "list_bots",
         "list_open_deals",
         "open_deal",
+        "scan_arbitrage",
         "start_bot",
         "stop_bot",
       ].sort(),
@@ -171,6 +172,16 @@ describe.skipIf(!isBuilt)("MCP server over stdio", () => {
       quoteAmount: 25,
       orderType: "market",
     });
+  });
+
+  it("scans arbitrage as a read-only query with sensible defaults", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "scan_arbitrage", arguments: {} });
+
+    expect(received[0].method).toBe("GET");
+    expect(received[0].url).toContain("/api/trpc/arbitrage.scan");
+    expect(decodeURIComponent(received[0].url)).toContain('"symbol":"BTC/USDT"');
   });
 
   it("reports API failures as tool errors rather than crashing the server", async () => {

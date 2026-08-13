@@ -4,8 +4,16 @@ import { tradeWidgets } from "./trades.js";
 import { marketWidgets } from "./market.js";
 import { analyticsWidgets } from "./analytics.js";
 import { opsWidgets } from "./ops.js";
+import { arbitrageWidgets } from "./arbitrage.js";
 
-const WIDGETS = [...overviewWidgets, ...tradeWidgets, ...marketWidgets, ...analyticsWidgets, ...opsWidgets];
+const WIDGETS = [
+  ...overviewWidgets,
+  ...tradeWidgets,
+  ...marketWidgets,
+  ...arbitrageWidgets,
+  ...analyticsWidgets,
+  ...opsWidgets,
+];
 
 const BY_ID = new Map(WIDGETS.map((widget) => [widget.id, widget]));
 
