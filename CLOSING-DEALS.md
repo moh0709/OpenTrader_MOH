@@ -143,7 +143,7 @@ Register with Hermes:
       "args": ["/root/.hermes/opentrader/packages/mcp-server/dist/cli.mjs"],
       "env": {
         "OPENTRADER_ADMIN_PASSWORD": "<the admin password>",
-        "OPENTRADER_URL": "http://127.0.0.1:8000"
+        "OPENTRADER_URL": "http://[::1]:8000"
       }
     }
   }
@@ -153,7 +153,7 @@ Register with Hermes:
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENTRADER_ADMIN_PASSWORD` | *(required)* | Sent as the `Authorization` header. Falls back to `ADMIN_PASSWORD`. |
-| `OPENTRADER_URL` | `http://127.0.0.1:8000` | Daemon base URL — loopback by default |
+| `OPENTRADER_URL` | `http://127.0.0.1:8000` | Daemon base URL. **On this VPS it must be `http://[::1]:8000`** — the daemon binds IPv6 loopback, and an unrelated service holds IPv4 `127.0.0.1:8000`. The server probes on startup and warns loudly if it cannot reach OpenTrader. |
 | `OPENTRADER_TIMEOUT_MS` | `30000` | Per-request timeout |
 
 The server refuses to start without a password rather than failing later on every
