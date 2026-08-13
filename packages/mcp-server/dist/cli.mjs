@@ -21325,11 +21325,24 @@ function createServer(config2) {
 }
 
 // src/cli.ts
+async function probe(config2) {
+  try {
+    await query(config2, "bot.list");
+    process.stderr.write(`[opentrader-mcp] connected to OpenTrader at ${config2.baseUrl}
+`);
+  } catch (err) {
+    process.stderr.write(
+      `[opentrader-mcp] WARNING: could not reach OpenTrader at ${config2.baseUrl}: ${err.message}
+[opentrader-mcp] Tools will start but every call will fail until this is fixed.
+[opentrader-mcp] If the daemon binds IPv6 loopback, set OPENTRADER_URL=http://[::1]:8000 \u2014 127.0.0.1 on the same port can reach a different service entirely.
+`
+    );
+  }
+}
 async function main() {
   const config2 = configFromEnv();
   const server = createServer(config2);
-  process.stderr.write(`[opentrader-mcp] connecting to ${config2.baseUrl}
-`);
+  await probe(config2);
   await server.connect(new StdioServerTransport());
   process.stderr.write("[opentrader-mcp] ready\n");
 }
