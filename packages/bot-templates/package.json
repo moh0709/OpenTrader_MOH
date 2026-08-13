@@ -21,6 +21,8 @@
     "vitest": "^3.2.3"
   },
   "dependencies": {
+    "@opentrader/ai-team": "workspace:*",
+    "@opentrader/arbitrage": "workspace:*",
     "@opentrader/bot-processor": "workspace:*",
     "@opentrader/exchanges": "workspace:*",
     "@opentrader/logger": "workspace:*",
