@@ -4,6 +4,8 @@
     "baseUrl": ".",
     "outDir": "../../dts/packages/bot-templates",
     "paths": {
+      "@opentrader/ai-team": ["../ai-team/src/index.ts"],
+      "@opentrader/arbitrage": ["../arbitrage/src/index.ts"],
       "@opentrader/bot-processor": ["../bot-processor/src/index.ts"],
       "@opentrader/bot-processor/*": ["../bot-processor/src/*"],
       "@opentrader/exchanges": ["../exchanges/src/index.ts"],
@@ -19,6 +21,8 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../ai-team" },
+    { "path": "../arbitrage" },
     { "path": "../bot-processor" },
     { "path": "../exchanges" },
     { "path": "../logger" },

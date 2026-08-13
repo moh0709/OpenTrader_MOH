@@ -1,0 +1,25 @@
+{
+  "extends": "@opentrader/tsconfig/esm.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "outDir": "../../dts/packages/arbitrage",
+    "paths": {
+      "@opentrader/tsconfig/*": ["../tsconfig/*"],
+      "@opentrader/types": ["../types/src/index.ts"],
+      "@opentrader/types/*": ["../types/src/*"],
+      "@opentrader/logger": ["../logger/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"],
+  "references": [
+    {
+      "path": "../tsconfig"
+    },
+    {
+      "path": "../types"
+    },
+    {
+      "path": "../logger"
+    }
+  ]
+}

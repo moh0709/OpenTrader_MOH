@@ -18,3 +18,12 @@
 export { trpc } from "./trpc.js";
 export { type AppRouter, appRouter } from "./routers/appRouter.js";
 export { createContext, type Context } from "./utils/context.js";
+export {
+  registerTradeOps,
+  getTradeOps,
+  resetTradeOps,
+  type TradeOps,
+  type CloseMode,
+  type CloseOutcome,
+  type CloseTradeResult,
+} from "./services/trade-ops.registry.js";
