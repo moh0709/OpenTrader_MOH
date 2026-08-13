@@ -128,6 +128,15 @@ These are not suggestions. Each one prevents a specific, expensive mistake.
 | `get_bot` | `bot.getOne` | `botId` (bare number) | One bot's full configuration |
 | `list_open_deals` | `bot.openSmartTrades` | `{botId}` | That bot's open deals, with `smartTradeId` |
 | `get_bot_logs` | `bot.getBotLogs` | `{botId, limit, cursor:null}` | Recent log lines |
+| `scan_arbitrage` | `arbitrage.scan` | `{symbol, tradeQty, venues?}` | Cross-venue spreads, costed |
+
+**Reading `scan_arbitrage`.** Each route reports two spreads. `topOfBookSpreadBps`
+is the naive number; `netSpreadBps` is what survives walking real depth to your
+size and paying taker fees on both legs. **Quote the second one.** The first is
+almost always flattering — in a live scan of 42 venue pairs, all 42 looked
+positive at the top of book and none were profitable after costs. If nothing is
+executable, say so plainly; do not present the top-of-book figure as an
+opportunity. `executable: 0` is the normal, correct answer on liquid pairs.
 
 ### Bot lifecycle — reversible
 
