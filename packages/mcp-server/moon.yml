@@ -1,0 +1,18 @@
+tasks:
+  build:
+    command: tsup
+    platform: node
+    inputs:
+      - "src/**/*"
+      - "package.json"
+      - "tsup.config.ts"
+    outputs:
+      - "dist"
+  lint:
+    command: oxlint
+  lint-fix:
+    command: oxlint --fix
+  typecheck:
+    command: tsc --noEmit
+  test:
+    command: vitest

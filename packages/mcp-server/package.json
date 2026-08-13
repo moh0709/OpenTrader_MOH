@@ -1,0 +1,24 @@
+{
+  "name": "@opentrader/mcp-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MCP server exposing OpenTrader bot control and deal closing to AI agents",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "bin": {
+    "opentrader-mcp": "./dist/cli.mjs"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@opentrader/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "tsup": "^8.5.0",
+    "typescript": "5.8.3",
+    "vitest": "^3.2.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "3.25.65"
+  }
+}
