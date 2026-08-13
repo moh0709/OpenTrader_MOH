@@ -16,6 +16,7 @@
  * Repository URL: https://github.com/bludnic/opentrader
  */
 export * from "./xprisma.js";
+export * from "./bot-log.js";
 export * from "./types/index.js";
 export * from "./entities/index.js";
 export * from "./asserts/index.js";

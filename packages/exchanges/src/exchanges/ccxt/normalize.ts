@@ -4,6 +4,44 @@ import { OrderSide, XOrderType } from "@opentrader/types";
 import type { Normalize } from "../../types/normalize.interface.js";
 import { normalizeOrderStatus } from "../../utils/normalizeOrderStatus.js";
 
+/**
+ * The fee, always expressed in the quote currency.
+ *
+ * CCXT reports `fee.cost` denominated in `fee.currency`, and which currency
+ * that is depends on the exchange and the side: a spot buy is commonly charged
+ * in the base asset (you simply receive slightly less of what you bought)
+ * while a sell is charged in quote. Keeping only the cost, as this used to,
+ * throws away the one piece of information needed to read the number.
+ *
+ * A consumer left guessing gets it wrong whenever the guess does not hold. The
+ * dashboard guessed "buy fees are base" and multiplied every entry fee by the
+ * fill price, which turned a $0.94 fee into $1,765 and a winning trade into a
+ * reported $1,757 loss. Normalising here means nothing downstream has to know
+ * any of this.
+ *
+ * A fee paid in some third currency - an exchange's own discount token, say -
+ * cannot be converted without a rate we do not have here, so it is passed
+ * through unchanged. That is a small error; multiplying by the fill price
+ * would be a large one.
+ */
+export function feeInQuoteCurrency(order: {
+  fee?: { cost?: number; currency?: string } | undefined;
+  symbol?: string | undefined;
+  average?: number | undefined;
+  price?: number | undefined;
+}): number {
+  const cost = order.fee?.cost;
+  if (!cost) return 0;
+
+  const currency = order.fee?.currency;
+  const base = order.symbol?.split("/")[0];
+  if (!currency || !base || currency !== base) return cost;
+
+  const price = order.average || order.price;
+
+  return price ? cost * price : cost;
+}
+
 const accountAssets: Normalize["accountAssets"] = {
   response: (data) =>
     Object.entries(data).flatMap(([currency, balance]) => {
@@ -35,7 +73,7 @@ const getLimitOrder: Normalize["getLimitOrder"] = {
     price: order.price, // could be undefined for market order, in case not filled yet?
     filledPrice: order.average || null,
     status: normalizeOrderStatus(order),
-    fee: order.fee?.cost || 0,
+    fee: feeInQuoteCurrency(order),
     createdAt: order.timestamp,
     lastTradeTimestamp: order.lastTradeTimestamp,
   }),
@@ -116,7 +154,7 @@ const getOpenOrders: Normalize["getOpenOrders"] = {
       price: order.price,
       filledPrice: null,
       status: normalizeOrderStatus(order) as "open",
-      fee: order.fee?.cost || 0,
+      fee: feeInQuoteCurrency(order),
       createdAt: order.timestamp,
       lastTradeTimestamp: order.lastTradeTimestamp,
     })),
@@ -137,7 +175,7 @@ const getClosedOrders: Normalize["getClosedOrders"] = {
       price: order.price,
       filledPrice: order.average || order.price, // assume that filled order must always contain `order.average`
       status: normalizeOrderStatus(order) as "filled" | "canceled",
-      fee: order.fee?.cost || 0,
+      fee: feeInQuoteCurrency(order),
       createdAt: order.timestamp,
       lastTradeTimestamp: order.lastTradeTimestamp,
     })),
@@ -223,7 +261,7 @@ const watchOrders: Normalize["watchOrders"] = {
       price: order.price,
       filledPrice: order.average || null,
       status: normalizeOrderStatus(order),
-      fee: order.fee?.cost || 0,
+      fee: feeInQuoteCurrency(order),
       createdAt: order.timestamp,
       lastTradeTimestamp: order.lastTradeTimestamp,
     })),

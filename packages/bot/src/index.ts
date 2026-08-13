@@ -21,3 +21,18 @@ export { Platform } from "./platform.js";
 export { App } from "./app.js";
 export { closeSmartTrade, closeBotTrades, closeAllTrades } from "./trade-closer.js";
 export type { CloseMode, CloseOutcome, CloseTradeResult } from "./trade-closer.js";
+export {
+  findStrandedPositions,
+  recoverPosition,
+  recoverPositions,
+  type RecoverablePosition,
+  type RecoveryResult,
+} from "./processing/executors/recover-position.js";
+export {
+  previewPurge,
+  purgeBotTrades,
+  setBotLimits,
+  type PurgePreview,
+  type PurgeResult,
+  type SetLimitsResult,
+} from "./processing/executors/purge-bot.js";

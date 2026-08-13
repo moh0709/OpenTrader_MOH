@@ -5,6 +5,8 @@ import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import { appRouter } from "@opentrader/trpc";
+import { dashboardRestRoutes } from "./rest/dashboard-routes.js";
+import { shareRoutes } from "./rest/share-routes.js";
 import { createContext } from "./trpc.js";
 
 // Path to the current file
@@ -13,6 +15,13 @@ const __dirname = path.dirname(__filename);
 
 export type CreateServerOptions = {
   frontendDistPath: string;
+  /**
+   * Static root for the analytics dashboard, served at `/analytics/`.
+   *
+   * Kept separate from `frontendDistPath` because the bundled frontend is
+   * replaced wholesale by `pnpm ui:sync`, which removes the directory first.
+   */
+  dashboardUiPath?: string;
   port: number;
   host: string;
 };
@@ -38,6 +47,15 @@ export const createServer = (params: CreateServerOptions) => {
     prefix: "/", // optional: default '/'
   });
 
+  if (params.dashboardUiPath) {
+    fastify.register(fastifyStatic, {
+      root: path.join(__dirname, params.dashboardUiPath),
+      prefix: "/analytics/",
+      // Only the first registration may decorate the reply object.
+      decorateReply: false,
+    });
+  }
+
   fastify.register(fastifyTRPCPlugin, {
     prefix: "/api/trpc",
     trpcOptions: {
@@ -45,6 +63,12 @@ export const createServer = (params: CreateServerOptions) => {
       createContext,
     },
   });
+
+  // Plain JSON surface for automation, alongside the tRPC router the UI uses.
+  fastify.register(dashboardRestRoutes, { prefix: "/api/dash" });
+
+  // The only surface reachable without the admin password: a share-token view.
+  fastify.register(shareRoutes, { prefix: "/api/share" });
 
   return {
     app: fastify,
