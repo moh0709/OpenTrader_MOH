@@ -1,4 +1,6 @@
 import { findStrategy, loadCustomStrategies } from "@opentrader/bot-templates/server";
+import { registerTradeOps } from "@opentrader/trpc";
+import { closeAllTrades, closeBotTrades, closeSmartTrade } from "./trade-closer.js";
 import {
   xprisma,
   type ExchangeAccountWithCredentials,
@@ -37,6 +39,11 @@ export class Platform {
   }
 
   async bootstrap() {
+    // Hand the API layer its trade operations. It declares the contract but
+    // cannot import this package (it would close a dependency cycle), so the
+    // daemon supplies the implementation as it comes up.
+    registerTradeOps({ closeSmartTrade, closeBotTrades, closeAllTrades });
+
     const customStrategiesPath = process.env.CUSTOM_STRATEGIES_PATH;
     if (customStrategiesPath) await this.loadCustomStrategies(customStrategiesPath);
 

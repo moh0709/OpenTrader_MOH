@@ -19,3 +19,5 @@ export * from "./channels/index.js";
 export { CCXTCandlesProvider } from "./market-data/ccxt-candles.provider.js";
 export { Platform } from "./platform.js";
 export { App } from "./app.js";
+export { closeSmartTrade, closeBotTrades, closeAllTrades } from "./trade-closer.js";
+export type { CloseMode, CloseOutcome, CloseTradeResult } from "./trade-closer.js";
