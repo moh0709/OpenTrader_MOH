@@ -10,7 +10,16 @@ import { clearPassword, getPassword, setPassword, verifyPassword } from "./lib/a
 import { store } from "./lib/store.js";
 import { initToasts, toast, toastForEvent } from "./lib/toast.js";
 import { initPoller, resetCursor, schedule, tick } from "./lib/poller.js";
-import { PRESETS, addWidget, applyHeightMode, applyPreset, initLayout, instanceCount, resetLayout } from "./lib/layout.js";
+import {
+  PRESETS,
+  addWidget,
+  applyHeightMode,
+  applyPreset,
+  focusGroup,
+  initLayout,
+  instanceCount,
+  resetLayout,
+} from "./lib/layout.js";
 import { groupedCatalog } from "./widgets/index.js";
 import { el, mount } from "./lib/dom.js";
 import { money, timeAgo } from "./lib/format.js";
@@ -379,6 +388,30 @@ function renderSettings() {
   );
 }
 
+// ---------- Deep links ----------
+
+/**
+ * A fragment naming a widget group opens the board on that group.
+ *
+ * This is how the "Arbitrage" button in the main OpenTrader navigation arrives:
+ * it is a link to /analytics/#arbitrage, and the dashboard is a separate
+ * document, so the fragment is the only state it can carry across.
+ *
+ * An unrecognised fragment is left alone rather than treated as an error. The
+ * main app is a hash-routed React bundle and its login guard writes
+ * "#/dashboard/login" onto whatever page it is injected into, so fragments that
+ * mean nothing here do turn up and must simply be ignored.
+ */
+function bindHashFocus() {
+  const apply = () => {
+    const slug = window.location.hash.replace(/^#/, "").trim().toLowerCase();
+    if (slug) focusGroup(slug);
+  };
+
+  window.addEventListener("hashchange", apply);
+  apply();
+}
+
 // ---------- Start ----------
 
 function start() {
@@ -387,6 +420,7 @@ function start() {
   bindChrome();
   initToasts(document.querySelector("[data-toasts]"), document.querySelector("[data-toasts-alerts]"));
   initLayout(document.querySelector("[data-grid]"));
+  bindHashFocus();
 
   store.subscribe((reason) => {
     if (reason === "snapshot" || reason === "health" || reason === "error") renderHeader();

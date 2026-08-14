@@ -232,6 +232,16 @@ button, input, select { font: inherit; color: inherit; }
 .widget--drop-target { outline: 2px dashed var(--series-1); outline-offset: 2px; }
 /* Hold the previous render while refetching - no skeleton, no layout jump. */
 .widget--stale .widget__body { opacity: 0.55; transition: opacity 160ms; }
+/* Arriving from a deep link such as /analytics/#arbitrage. The ring says which
+   widgets were asked for, then gets out of the way. */
+.widget--focus { animation: widget-focus 2s ease-out; }
+@keyframes widget-focus {
+  0%, 60% { box-shadow: 0 0 0 2px var(--series-1), var(--shadow); }
+  100% { box-shadow: 0 0 0 0 transparent, var(--shadow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .widget--focus { animation: none; box-shadow: 0 0 0 2px var(--series-1), var(--shadow); }
+}
 
 .widget__head {
   display: flex; align-items: center; gap: 8px;

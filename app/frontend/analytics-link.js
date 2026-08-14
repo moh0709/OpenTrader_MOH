@@ -1,27 +1,19 @@
 /**
- * Adds an "Analytics" item to the OpenTrader navigation.
+ * Adds "Analytics" and "Arbitrage" buttons beside the logo in the top bar.
  *
- * The bundled frontend is a prebuilt React application with no source in this
- * repository, so it cannot gain a route. The same overlay approach already used
- * by `rsi-monitor.js` applies here: find the existing nav and append a link,
- * re-attaching whenever React re-renders the header away.
+ * They used to be cloned into the navigation list, which put them alongside
+ * Bots/Strategies/Settings on wide screens but inside the burger drawer on a
+ * phone - two different places, and invisible until you opened the menu.
+ * Anchoring to the logo instead puts them in one spot that is always on screen,
+ * because the logo is the only element of that bar rendered in both layouts.
  *
- * The app renders the navigation twice - a horizontal bar for wide screens and a
- * vertical list inside the burger drawer for narrow ones - and only one of them
- * is ever visible. Both get the link, otherwise it disappears on a phone.
- *
- * Rather than hard-code class names, which are minified and change on every
- * upstream build, each link is cloned from a real nav item and rewritten. The
- * clone inherits whatever markup and styling that nav uses, so the item looks
- * native in both the bar and the drawer without knowing anything about either.
+ * The anchor is the logo's href, not its class: the app is a prebuilt bundle
+ * whose class names ("joy-1o905kn") are regenerated on every upstream build,
+ * so matching on them would break at the next release. The route "/#/" is part
+ * of the app's own URL scheme and survives rebuilds.
  */
-/**
- * The links to install. Each is cloned from a real nav item, so it inherits the
- * app's own markup and styling without this file knowing anything about either.
- *
- * `icon` receives the cloned <svg>, already emptied and sized, and draws into it
- * with strokes so the glyph inherits the nav's colour.
- */
+
+/** The links to install, in the order they appear after the logo. */
 const LINKS = [
   {
     mark: "data-opentrader-analytics-link",
@@ -38,59 +30,7 @@ const LINKS = [
     icon: (svg) => exchangeArrows(svg),
   },
 ];
-const NAV_ITEMS = ["Bots", "Strategies", "Exchange Accounts", "Settings"];
 
-/**
- * Every container that holds at least two nav items.
- *
- * Identified by structure rather than by class: the labels are stable across
- * builds, the class names are not. Returns the nearest such ancestor for each
- * distinct nav, so the wide-screen bar and the drawer list are both found.
- */
-export function findNavContainers(doc = document) {
-  const items = [...doc.querySelectorAll("a, button")].filter((node) =>
-    NAV_ITEMS.includes(node.textContent?.trim() ?? ""),
-  );
-  if (items.length < 2) return [];
-
-  const containers = new Set();
-
-  for (const item of items) {
-    let candidate = item.parentElement;
-
-    while (candidate && candidate !== doc.body) {
-      if (items.filter((other) => candidate.contains(other)).length >= 2) {
-        containers.add(candidate);
-        break;
-      }
-      candidate = candidate.parentElement;
-    }
-  }
-
-  return [...containers];
-}
-
-/** The nav item to copy: the last one, so the clone lands in the same style. */
-function templateItem(container) {
-  const items = [...container.children].filter((child) => !child.hasAttribute(MARK));
-
-  return items[items.length - 1] ?? null;
-}
-
-/**
- * Replace the label wherever it actually lives.
- *
- * A drawer item wraps its text in one or more spans, a bar item does not, so
- * the text is written to the deepest element that holds it rather than to the
- * anchor itself - which would otherwise wipe out the wrapper markup.
- */
-function setLabel(node, label) {
-  const holder =
-    [...node.querySelectorAll("*")].reverse().find((child) => child.children.length === 0 && child.textContent?.trim()) ??
-    node;
-
-  holder.textContent = label;
-}
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -125,53 +65,108 @@ function exchangeArrows(svg) {
   stroke(svg, { x1: 9, x2: 5, y1: 19, y2: 15 });
 }
 
-function setIcon(link, draw) {
-  const icon = link.querySelector("svg");
-  if (!icon) return;
 
-  while (icon.firstChild) icon.removeChild(icon.firstChild);
-  icon.setAttribute("viewBox", "0 0 24 24");
-  draw(icon);
+/**
+ * The logo link in the top bar.
+ *
+ * Matched on the app's own root route and confirmed to sit at the top of the
+ * page, so a stray "/#/" link further down the document cannot be mistaken for
+ * it.
+ */
+function logoLink(doc) {
+  for (const anchor of doc.querySelectorAll('a[href="/#/"]')) {
+    const box = anchor.getBoundingClientRect();
+    if (box.top < 90 && box.width > 0) return anchor;
+  }
+
+  return null;
 }
 
-function buildLink(container, spec) {
-  const template = templateItem(container);
-  if (!template) return null;
-
-  const link = template.cloneNode(true);
-
+/** One button, built from scratch rather than cloned. */
+function buildLink(spec) {
+  const link = document.createElement("a");
   link.setAttribute(spec.mark, "");
-  // A clone of the current page would otherwise claim to be active too.
-  link.removeAttribute("aria-current");
-  link.removeAttribute("data-status");
-  link.classList.remove("active");
-  link.removeAttribute("id");
-  for (const child of link.querySelectorAll("[id]")) child.removeAttribute("id");
+  link.href = spec.target;
+  link.className = `ot-toplink ot-toplink--${spec.label.toLowerCase()}`;
+  // The label is also the accessible name, so hiding the text on a narrow
+  // screen does not leave a button that only reads as "link".
+  link.setAttribute("aria-label", spec.label);
+  link.title = spec.label;
 
-  // The dashboard is a separate document, so this is a real navigation, not a
-  // hash route the React router would try to handle.
-  if (link.tagName === "A") link.setAttribute("href", spec.target);
-  else link.addEventListener("click", () => (window.location.href = spec.target));
+  const icon = document.createElementNS(SVG_NS, "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("width", "18");
+  icon.setAttribute("height", "18");
+  icon.setAttribute("aria-hidden", "true");
+  spec.icon(icon);
 
-  setLabel(link, spec.label);
-  setIcon(link, spec.icon);
+  const text = document.createElement("span");
+  text.className = "ot-toplink__label";
+  text.textContent = spec.label;
+
+  link.append(icon, text);
 
   return link;
 }
 
-export function attachLinks(doc = document) {
-  let added = 0;
+/**
+ * Styling.
+ *
+ * Written against Joy's palette variables with plain fallbacks, so the buttons
+ * follow the app's light and dark themes instead of pinning colours that would
+ * be unreadable in one of them.
+ */
+function installStyle(doc) {
+  if (doc.getElementById("ot-toplink-style")) return;
 
-  for (const container of findNavContainers(doc)) {
-    for (const spec of LINKS) {
-      if (container.querySelector(`[${spec.mark}]`)) continue;
-
-      const link = buildLink(container, spec);
-      if (!link) continue;
-
-      container.append(link);
-      added += 1;
+  const style = doc.createElement("style");
+  style.id = "ot-toplink-style";
+  style.textContent = `
+    .ot-toplink {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-left: 8px; padding: 6px 10px;
+      border-radius: 8px; text-decoration: none; white-space: nowrap;
+      font-size: 14px; font-weight: 500; line-height: 1;
+      color: var(--joy-palette-text-secondary, #52514e);
+      border: 1px solid var(--joy-palette-divider, rgba(128,128,128,.28));
     }
+    .ot-toplink:hover {
+      color: var(--joy-palette-text-primary, #0b0b0b);
+      background: var(--joy-palette-neutral-plainHoverBg, rgba(128,128,128,.12));
+    }
+    /* On a narrow bar something has to give, but not the Analytics label -
+       an unlabelled chart glyph beside an unlabelled arrows glyph is a puzzle,
+       and Analytics is the one people are looking for. Arbitrage keeps its
+       icon and its accessible name, which is what the space actually allows. */
+    @media (max-width: 460px) {
+      .ot-toplink { padding: 6px 8px; margin-left: 6px; font-size: 13px; }
+      .ot-toplink--arbitrage { padding: 6px; }
+      .ot-toplink--arbitrage .ot-toplink__label { display: none; }
+    }
+  `;
+  doc.head.append(style);
+}
+
+function attachLinks(doc = document) {
+  const logo = logoLink(doc);
+  if (!logo) return 0;
+
+  installStyle(doc);
+
+  let added = 0;
+  let after = logo;
+
+  for (const spec of LINKS) {
+    // Re-check each pass: React re-renders the bar on navigation and drops them.
+    if (doc.querySelector(`[${spec.mark}]`)) {
+      after = doc.querySelector(`[${spec.mark}]`);
+      continue;
+    }
+
+    const link = buildLink(spec);
+    after.after(link);
+    after = link;
+    added += 1;
   }
 
   return added;
@@ -188,8 +183,8 @@ export function startAnalyticsLink() {
     attachLinks();
   };
 
-  // The drawer is mounted only when opened, and React re-renders the header on
-  // navigation, so both need watching rather than a single pass at load.
+  // React re-renders the header on navigation, so a single pass at load is not
+  // enough - the buttons have to be put back each time the bar is rebuilt.
   const observer = new MutationObserver(() => {
     if (queued) return;
 

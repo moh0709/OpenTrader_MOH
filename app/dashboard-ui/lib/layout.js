@@ -11,6 +11,7 @@
  * never ends up with a tiny nested scrollbar.
  */
 import { el } from "./dom.js";
+import { groupSlug } from "./groups.js";
 import { layoutStorage, store } from "./store.js";
 import { getWidget, widgetCatalog } from "../widgets/index.js";
 
@@ -112,7 +113,7 @@ export function addWidget(type, config) {
   if (widget.singleton && instanceCount(type) > 0) {
     // Already on the board: scroll to it rather than adding a duplicate.
     const existing = instances.find((instance) => instance.type === type);
-    document.querySelector(`[data-uid="${existing.uid}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    focusCards([existing.uid]);
     return;
   }
 
@@ -121,7 +122,98 @@ export function addWidget(type, config) {
   persist();
   renderAll();
 
-  document.querySelector(`[data-uid="${instance.uid}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  focusCards([instance.uid]);
+}
+
+// ---------- Focus ----------
+
+const FOCUS_MS = 2000;
+
+/**
+ * Which cards are currently ringed, and until when.
+ *
+ * Held here rather than only on the elements because the board rebuilds itself
+ * when the first snapshot arrives, which is normally about a second after a cold
+ * load - precisely the path a deep link takes. Without this the ring would be
+ * thrown away almost as soon as it appeared.
+ */
+let focused = { uids: [], until: 0 };
+
+function ring(card) {
+  card.classList.remove("widget--focus");
+  // Restart the animation rather than let a second click land on a class the
+  // element already carries, which would play nothing.
+  void card.offsetWidth;
+  card.classList.add("widget--focus");
+}
+
+/** Re-apply a still-live ring to freshly built cards. Does not scroll again. */
+function restoreFocus() {
+  if (Date.now() >= focused.until) return;
+
+  for (const uid of focused.uids) {
+    const card = gridNode?.querySelector(`[data-uid="${uid}"]`);
+    if (card) ring(card);
+  }
+}
+
+/**
+ * Scroll a set of cards into view and mark them briefly.
+ *
+ * The mark matters when the widgets were already on the board: without it a
+ * scroll to a board that is mostly one shade of grey gives no confirmation that
+ * anything happened, which reads as a dead link.
+ */
+function focusCards(uids) {
+  const cards = uids.map((uid) => gridNode?.querySelector(`[data-uid="${uid}"]`)).filter(Boolean);
+  if (cards.length === 0) return;
+
+  focused = { uids: [...uids], until: Date.now() + FOCUS_MS };
+
+  cards[0].scrollIntoView({ behavior: "smooth", block: "center" });
+  for (const card of cards) ring(card);
+
+  window.setTimeout(() => {
+    focused = { uids: [], until: 0 };
+    for (const uid of uids) gridNode?.querySelector(`[data-uid="${uid}"]`)?.classList.remove("widget--focus");
+  }, FOCUS_MS);
+}
+
+/**
+ * Put a whole widget group on the board and scroll to it.
+ *
+ * This is what the "Arbitrage" button in the main app navigates to. The widgets
+ * already existed in the catalogue, but reaching them meant opening the Add
+ * widget drawer and knowing to look under a group heading — so the button led to
+ * a board that showed no arbitrage at all.
+ *
+ * Missing widgets are added and kept, rather than shown as a temporary view: the
+ * board is the user's own layout, and a group they asked for by name belongs on
+ * it. Repeat visits add nothing further and just scroll back to it.
+ */
+export function focusGroup(slug) {
+  const wanted = widgetCatalog().filter((widget) => groupSlug(widget.group) === slug);
+  if (wanted.length === 0) return false;
+
+  const added = [];
+
+  for (const widget of wanted) {
+    if (instanceCount(widget.id) > 0) continue;
+
+    const instance = makeInstance(widget.id);
+    instances.push(instance);
+    added.push(instance);
+  }
+
+  if (added.length > 0) {
+    persist();
+    renderAll();
+  }
+
+  const uids = instances.filter((instance) => wanted.some((w) => w.id === instance.type)).map((i) => i.uid);
+  focusCards(uids);
+
+  return true;
 }
 
 export function removeWidget(uid) {
@@ -164,6 +256,7 @@ function renderAll() {
   for (const instance of instances) gridNode.append(buildCard(instance));
 
   document.querySelector("[data-empty]")?.toggleAttribute("hidden", instances.length > 0);
+  restoreFocus();
 }
 
 function renderOne(instance) {
