@@ -26,6 +26,17 @@
             <span class="brand__text">Analytics</span>
           </span>
 
+          <!-- The same jump the main app's Arbitrage button makes, for once you
+               are already in here. It matches that button's icon on purpose: it
+               is the same destination reached from a different document. Removed
+               for share-link viewers, whose board is a single feed card. -->
+          <button type="button" class="btn" data-open-arbitrage title="Go to cross-venue arbitrage">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path d="M4 8h13M14 5l3 3-3 3M20 16H7M10 13l-3 3 3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn__label">Arbitrage</span>
+          </button>
+
           <button type="button" class="health-pill" data-health-pill aria-live="polite">
             <span class="health-pill__dot" aria-hidden="true"></span>
             <span data-health-pill-text>Checking…</span>

@@ -535,6 +535,11 @@ button, input, select { font: inherit; color: inherit; }
   .topbar__right { width: 100%; }
   .grid { padding: var(--gap) 12px 60px; }
 
+  /* The left group gained a button and must be free to wrap rather than push
+     the health pill off the edge on a narrow phone. Arbitrage keeps its word:
+     it is a destination, and an unlabelled glyph beside a chevron is a guess. */
+  .topbar__left { flex-wrap: wrap; }
+
   /* The chevron alone reads as "back"; the word costs room better spent on
      the health pill and the refresh controls. */
   .btn--back .btn__label { display: none; }

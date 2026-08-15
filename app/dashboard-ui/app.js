@@ -105,6 +105,14 @@ function bindChrome() {
   document.querySelector("[data-open-settings]").addEventListener("click", () => openDrawer("settings"));
   document.querySelector("[data-health-pill]").addEventListener("click", () => addWidget("health"));
 
+  // In-document, so no reload: the board is already here, it only has to be
+  // brought into view. The fragment is written too, so the URL matches what is
+  // on screen and the button's destination stays linkable and shareable.
+  document.querySelector("[data-open-arbitrage]")?.addEventListener("click", () => {
+    focusGroup("arbitrage");
+    if (window.location.hash !== "#arbitrage") window.history.replaceState(null, "", "#arbitrage");
+  });
+
   for (const node of document.querySelectorAll("[data-catalog-close]")) {
     node.addEventListener("click", () => closeDrawer("catalog"));
   }

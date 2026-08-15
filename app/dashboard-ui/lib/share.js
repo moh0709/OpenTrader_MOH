@@ -172,7 +172,15 @@ export function startLiveFeed(token) {
   app.hidden = false;
 
   // Strip the dashboard chrome: none of it applies to a read-only viewer.
-  for (const selector of ["[data-open-catalog]", "[data-open-settings]", "[data-health-pill]", "[data-open-share]", "[data-share-presence]"]) {
+  for (const selector of [
+    "[data-open-catalog]",
+    "[data-open-settings]",
+    "[data-health-pill]",
+    "[data-open-share]",
+    "[data-share-presence]",
+    // There is no widget board behind it here, only the feed card.
+    "[data-open-arbitrage]",
+  ]) {
     document.querySelector(selector)?.remove();
   }
 
