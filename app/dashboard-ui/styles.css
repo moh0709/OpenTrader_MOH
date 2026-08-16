@@ -686,3 +686,82 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
   /* Keep the colour and weight change, drop the movement. */
   .ticker__value--rising { animation: none; background: rgba(10, 82, 48, .16); }
 }
+
+/* --- Research widgets ------------------------------------------------------
+ *
+ * `.table td` is `white-space: nowrap`, which is right for the numeric tables
+ * it was written for and wrong for these: a council summary and a governor's
+ * reasoning are sentences, and a sentence that cannot wrap is a sentence nobody
+ * reads. These are the only cells on the board that carry prose.
+ */
+.rsrch-wrap {
+  white-space: normal;
+  min-width: 220px;
+  max-width: 520px;
+  line-height: 1.45;
+}
+
+.rsrch-num { font-variant-numeric: tabular-nums; }
+.rsrch-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rsrch-stack { display: flex; flex-direction: column; gap: 10px; }
+
+/* The transcript pane. A council run produces several thousand words, so this
+ * is the one place on the board designed for reading rather than scanning:
+ * bounded measure, generous leading, and its own scroll so the widget keeps
+ * whatever height the operator gave it. */
+.rsrch-doc {
+  max-height: 100%;
+  overflow-y: auto;
+  padding-right: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.rsrch-doc p {
+  margin: 0 0 10px;
+  max-width: 78ch;
+}
+
+/* The model writes `**Rating**: Buy` style headers; these are lifted out and
+ * rendered as headings so the structure survives without a markdown parser. */
+.rsrch-doc .rsrch-h {
+  margin: 14px 0 6px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary, var(--text-primary));
+}
+
+.rsrch-doc .rsrch-h:first-child { margin-top: 0; }
+
+.rsrch-doc li {
+  margin: 0 0 6px 18px;
+  max-width: 76ch;
+  list-style: disc;
+}
+
+/* Bull and bear side by side: the debate is the point, and reading the two
+ * cases in sequence loses the disagreement that produced the confidence score. */
+.rsrch-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .rsrch-split { grid-template-columns: 1fr; }
+}
+
+.rsrch-side__head {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.rsrch-side__head--bull { color: var(--pos, #2e9e5b); }
+.rsrch-side__head--bear { color: var(--neg, #d05252); }
