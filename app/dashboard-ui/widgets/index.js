@@ -5,12 +5,14 @@ import { marketWidgets } from "./market.js";
 import { analyticsWidgets } from "./analytics.js";
 import { opsWidgets } from "./ops.js";
 import { arbitrageWidgets } from "./arbitrage.js";
+import { researchWidgets } from "./research.js";
 
 const WIDGETS = [
   ...overviewWidgets,
   ...tradeWidgets,
   ...marketWidgets,
   ...arbitrageWidgets,
+  ...researchWidgets,
   ...analyticsWidgets,
   ...opsWidgets,
 ];
