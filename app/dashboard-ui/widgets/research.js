@@ -35,6 +35,18 @@ async function dash(path) {
   return response.json();
 }
 
+/**
+ * Render a list of nodes into a widget body.
+ *
+ * `mount(container, ...children)` is variadic, so `mount(body, [a, b])` passes
+ * the array itself as one child — and `Node.append()` stringifies anything that
+ * is not a Node, which puts "[object HTMLDivElement]" on screen instead of the
+ * content. Every multi-part render here goes through a single container.
+ */
+function panel(body, children) {
+  return mount(body, el("div", { class: "rsrch-stack" }, children));
+}
+
 const STANCE_LABEL = {
   strong_buy: "Strong buy",
   buy: "Buy",
@@ -138,7 +150,7 @@ export const convictionBoardWidget = {
           ]);
         });
 
-      mount(ctx.body, [
+      panel(ctx.body, [
         note("A bullish or neutral reading changes nothing: the governor is only able to reduce risk, never add it."),
         el("table", { class: "table" }, [
           el("thead", {}, [
@@ -214,7 +226,7 @@ export const regimeImpactWidget = {
         ]);
       });
 
-      mount(ctx.body, [
+      panel(ctx.body, [
         note(
           throttled > 0
             ? `${throttled} of ${bots.length} managed bots are throttled below baseline. Open positions keep their exits and close normally.`
@@ -317,7 +329,7 @@ export const researchRoomWidget = {
       );
 
       if (section === "debate") {
-        return mount(ctx.body, [
+        return panel(ctx.body, [
           header,
           ratings,
           el("div", { class: "rsrch-split" }, [
@@ -333,7 +345,7 @@ export const researchRoomWidget = {
         ]);
       }
 
-      mount(ctx.body, [header, ratings, el("div", { class: "rsrch-doc" }, prose(reports[section]))]);
+      panel(ctx.body, [header, ratings, el("div", { class: "rsrch-doc" }, prose(reports[section]))]);
     };
 
     void load();
@@ -390,7 +402,7 @@ export const researchLogWidget = {
         ]),
       );
 
-      mount(ctx.body, [
+      panel(ctx.body, [
         note(
           failures > 0
             ? `${runs.length} runs shown, ${failures} failed. Spend across them: $${spend.toFixed(2)}.`

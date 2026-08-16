@@ -8,6 +8,10 @@ export default defineConfig({
     // touches the document is verified in a real browser instead, which is
     // the only place its layout and animation are actually true.
     environment: "node",
-    include: ["lib/**/*.test.js"],
+    // widgets/*.render.test.js is a deliberate exception to the note above:
+    // it asserts structure (do the nodes a widget builds actually reach the
+    // container) and never appearance, which a shim can check and a browser
+    // check would not have caught any earlier.
+    include: ["lib/**/*.test.js", "widgets/**/*.test.js"],
   },
 });
