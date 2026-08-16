@@ -21,6 +21,8 @@
       "@opentrader/types/*": ["../types/src/*"],
       "@opentrader/bot-processor": ["../bot-processor/src/index.ts"],
       "@opentrader/bot-processor/*": ["../bot-processor/src/*"],
+      "@opentrader/regime": ["../regime/src/index.ts"],
+      "@opentrader/regime/*": ["../regime/src/*"],
       "@opentrader/trpc": ["../trpc/src/index.ts"],
       "@opentrader/trpc/*": ["../trpc/src/*"]
     }
@@ -47,6 +49,9 @@
     },
     {
       "path": "../tools"
+    },
+    {
+      "path": "../regime"
     },
     {
       "path": "../trpc"

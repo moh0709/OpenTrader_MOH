@@ -18,6 +18,7 @@
 import { logger } from "@opentrader/logger";
 import { retentionDays, xprisma } from "@opentrader/db";
 import { createServer, CreateServerOptions } from "./server.js";
+import { RegimeService } from "./regime/regime.service.js";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 
 type AppParams = {
@@ -35,12 +36,14 @@ export class App {
    * @param server - The server instance created by the `createServer` function.
    */
   private logPruneTimer: NodeJS.Timeout | null = null;
+  private regime = new RegimeService();
 
   constructor(
     private platform: Platform,
     private server: ReturnType<typeof createServer>,
   ) {
     this.startLogPruning();
+    this.regime.start();
   }
 
   /**
@@ -109,6 +112,8 @@ export class App {
       clearInterval(this.logPruneTimer);
       this.logPruneTimer = null;
     }
+
+    this.regime.stop();
 
     await this.server.close();
     logger.info("Fastify Server has shut down gracefully.");

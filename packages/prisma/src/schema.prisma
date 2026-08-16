@@ -310,3 +310,57 @@ model ShareLink {
   @@unique([email, name])
   @@index([lastSeenAt])
 }
+
+/// Per-bot settings for the regime governor.
+///
+/// `baselineMaxCapital` is the operator's intent and the governor's ceiling. It
+/// is held here rather than read back from `Bot.maxCapital` because the governor
+/// *writes* that column — reading its own output as the next baseline would let
+/// a standing bearish call ratchet the bot down to nothing over a few hours of
+/// polling.
+model RegimePolicy {
+  botId Int @id
+
+  /// The cap the operator chose. Null means the bot is not under management.
+  baselineMaxCapital Float?
+  baselineMinProfit  Float?
+
+  /// Off means every decision resolves to baseline. The instant-revert switch.
+  armed Boolean @default(true)
+
+  /// Deepest reduction allowed, as a fraction of baseline.
+  floorFactor Float @default(0.1)
+
+  /// A conviction older than this reverts to baseline. Milliseconds.
+  maxAgeMs Int @default(93600000)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
+/// Latest research conviction per symbol, mirrored from the research service.
+///
+/// Mirrored rather than read live so the dashboard still renders — and can show
+/// how stale the reading is — when the research service is down.
+model RegimeConviction {
+  id Int @id @default(autoincrement())
+
+  symbol     String
+  stance     String
+  confidence Float
+
+  /// Epoch ms of the research run that produced this.
+  asOf    BigInt
+  summary String
+
+  model   String?
+  costUsd Float?
+
+  /// Id of the row in the research service's own store, for the transcript link.
+  sourceId Int?
+
+  createdAt DateTime @default(now())
+
+  /// The poller asks one question — latest per symbol — on a table that only grows.
+  @@index([symbol, asOf])
+}

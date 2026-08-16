@@ -26,6 +26,7 @@
     "@opentrader/event-bus": "workspace:*",
     "@opentrader/exchanges": "workspace:*",
     "@opentrader/logger": "workspace:*",
+    "@opentrader/regime": "workspace:*",
     "@opentrader/tools": "workspace:*",
     "@opentrader/trpc": "workspace:*",
     "@prisma/client": "6.9.0",
