@@ -695,7 +695,17 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
       if (!bot) throw new Error(`No bot ${botId}`);
 
-      const baseline = num(body.baselineMaxCapital) ?? bot.maxCapital;
+      const existing = (await xprisma.regimePolicy.findUnique({ where: { botId } })) as RegimePolicyRow | null;
+
+      // Seeding order matters. An explicit value always wins. Otherwise a bot
+      // that is already managed keeps its stored baseline, and only a brand new
+      // policy is seeded from the bot's current cap.
+      //
+      // Re-deriving the baseline from the current cap on every call looks
+      // harmless and is not: the governor *writes* that column, so re-arming a
+      // bot while it is throttled would adopt the throttled figure as the new
+      // ceiling and the reduction would never be given back.
+      const baseline = num(body.baselineMaxCapital) ?? existing?.baselineMaxCapital ?? bot.maxCapital;
       const armed = body.armed === undefined ? true : body.armed !== false;
       const floorFactor = Math.min(1, Math.max(0, num(body.floorFactor) ?? 0.1));
       const maxAgeMs = num(body.maxAgeMs) ?? 93_600_000;
