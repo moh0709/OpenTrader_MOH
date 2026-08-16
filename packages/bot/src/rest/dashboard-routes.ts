@@ -25,6 +25,8 @@ import {
   releaseDevice,
   revokeShare,
 } from "../processing/share/share.service.js";
+import { applyRegimeGovernor, requestResearchRun } from "@opentrader/regime";
+import { disarmRegime, syncRegime } from "../regime/regime.service.js";
 import { logger } from "@opentrader/logger";
 import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
 import {
@@ -52,6 +54,25 @@ const num = (value: unknown): number | undefined => {
 };
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+
+type RegimePolicyRow = {
+  botId: number;
+  baselineMaxCapital: number | null;
+  baselineMinProfit: number | null;
+  armed: boolean;
+  floorFactor: number;
+  maxAgeMs: number;
+};
+
+type RegimeConvictionRow = {
+  symbol: string;
+  stance: string;
+  confidence: number;
+  asOf: bigint;
+  summary: string;
+  model: string | null;
+  costUsd: number | null;
+};
 
 type AuthedRequest = FastifyRequest & { actor?: Actor };
 
@@ -116,6 +137,9 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
       { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
       { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
+      { path: "GET /api/dash/regime", params: {}, description: "Research convictions per symbol and the capital cap the governor holds each bot at." },
+      { path: "GET /api/dash/regime/transcript", params: { symbol: "string" }, description: "The full analyst reports and bull/bear debate behind a symbol's latest conviction." },
+      { path: "GET /api/dash/regime/runs", params: { limit: "1-200" }, description: "Recent research runs with cost and duration." },
       { path: "GET /api/dash/shares", params: {}, description: "Share links, their status and who is watching." },
       { path: "GET /api/dash/shares/watchers", params: {}, description: "Recipients watching a shared feed right now." },
     ],
@@ -129,6 +153,11 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/shares", body: { name: "string", email: "string", expiresAt: "ISO date" }, scope: "control", description: "Issue a read-only live-feed link for one person, on one device, until the expiry. Emails it and returns the URL." },
       { path: "POST /api/dash/shares/:id/revoke | /release", body: {}, scope: "control", description: "Revoke a link, or free it from the device holding it." },
       { path: "DELETE /api/dash/shares/:id", body: {}, scope: "control", description: "Delete a share link." },
+      { path: "POST /api/dash/actions/regime.setPolicy", body: { botId: "number", baselineMaxCapital: "number, defaults to the bot's current cap", armed: "boolean", floorFactor: "0-1", maxAgeMs: "number" }, scope: "control", description: "Put a bot under regime management. The baseline is the governor's ceiling: it may reduce below it and can never exceed it." },
+      { path: "POST /api/dash/actions/regime.unmanage", body: { botId: "number" }, scope: "control", description: "Remove a bot from regime management and restore its baseline cap." },
+      { path: "POST /api/dash/actions/regime.disarm", body: {}, scope: "control", description: "Disarm the governor and restore every managed bot to its baseline cap immediately." },
+      { path: "POST /api/dash/actions/regime.sync", body: {}, scope: "control", description: "Reconcile caps against the latest convictions now, without waiting for the poll." },
+      { path: "POST /api/dash/actions/regime.runNow", body: { symbols: "string[], optional" }, scope: "control", description: "Ask the research council to run now, out of schedule." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -529,5 +558,228 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "freeze", target: { frozen }, outcome: "allowed", detail: null });
 
     return { ok: true, frozen };
+  });
+
+  // --- Regime governor -----------------------------------------------------
+
+  /**
+   * What the council currently thinks, and what it is doing to each bot.
+   *
+   * Reads the local mirror rather than the research service, so this answers
+   * even while the council is down — with `ageMs` making the staleness visible
+   * instead of silently serving an old view as current.
+   */
+  fastify.get("/regime", async () => {
+    const policies = (await xprisma.regimePolicy.findMany()) as RegimePolicyRow[];
+    const bots = (await xprisma.bot.findMany({
+      select: { id: true, name: true, symbol: true, enabled: true, maxCapital: true, minProfit: true },
+    })) as { id: number; name: string; symbol: string; enabled: boolean; maxCapital: number | null; minProfit: number | null }[];
+
+    const symbols = [...new Set(bots.map((b) => b.symbol))];
+    const convictions: Record<string, unknown> = {};
+    const now = Date.now();
+
+    for (const symbol of symbols) {
+      const row = (await xprisma.regimeConviction.findFirst({
+        where: { symbol },
+        orderBy: { asOf: "desc" },
+      })) as RegimeConvictionRow | null;
+
+      if (!row) continue;
+
+      const asOf = Number(row.asOf);
+      convictions[symbol] = {
+        symbol,
+        stance: row.stance,
+        confidence: row.confidence,
+        asOf,
+        ageMs: now - asOf,
+        summary: row.summary,
+        model: row.model,
+        costUsd: row.costUsd,
+      };
+    }
+
+    const managed = bots.map((bot) => {
+      const policy = policies.find((p) => p.botId === bot.id) ?? null;
+      const conviction = convictions[bot.symbol] as { stance?: string; confidence?: number; asOf?: number } | undefined;
+
+      const decision = policy
+        ? applyRegimeGovernor(
+            {
+              botId: policy.botId,
+              baselineMaxCapital: policy.baselineMaxCapital,
+              baselineMinProfit: policy.baselineMinProfit,
+              armed: policy.armed,
+              floorFactor: policy.floorFactor,
+              maxAgeMs: policy.maxAgeMs,
+            },
+            conviction
+              ? {
+                  symbol: bot.symbol,
+                  stance: conviction.stance as never,
+                  confidence: conviction.confidence ?? 0,
+                  asOf: conviction.asOf ?? 0,
+                  summary: "",
+                }
+              : null,
+            now,
+          )
+        : null;
+
+      return {
+        botId: bot.id,
+        name: bot.name,
+        symbol: bot.symbol,
+        enabled: bot.enabled,
+        managed: policy !== null,
+        armed: policy?.armed ?? false,
+        baselineMaxCapital: policy?.baselineMaxCapital ?? null,
+        currentMaxCapital: bot.maxCapital,
+        minProfit: bot.minProfit,
+        // What the governor would decide right now, so the panel shows intent
+        // even between polls.
+        wouldCap: decision?.maxCapital ?? null,
+        factor: decision?.factor ?? 1,
+        reduced: decision?.reduced ?? false,
+        notes: decision?.notes ?? [],
+      };
+    });
+
+    return { convictions: Object.values(convictions), bots: managed };
+  });
+
+  /** The full debate behind one symbol's conviction, proxied from the council. */
+  fastify.get("/regime/transcript", async (request, reply) => {
+    const symbol = str((request.query as Record<string, unknown>).symbol);
+    if (!symbol) return reply.code(400).send({ error: "bad_request", message: "symbol is required" });
+
+    const base = process.env.RESEARCH_URL || "http://127.0.0.1:8801";
+    try {
+      const res = await fetch(`${base}/convictions/latest/${encodeURIComponent(symbol)}/full`);
+      if (!res.ok) return reply.code(res.status).send({ error: "unavailable", message: `research service returned ${res.status}` });
+
+      return await res.json();
+    } catch (error) {
+      return reply.code(503).send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  /** Recent research runs, their cost and their duration. */
+  fastify.get("/regime/runs", async (request, reply) => {
+    const base = process.env.RESEARCH_URL || "http://127.0.0.1:8801";
+    try {
+      const res = await fetch(`${base}/runs?limit=${num((request.query as Record<string, unknown>).limit) ?? 50}`);
+      if (!res.ok) return reply.code(res.status).send({ error: "unavailable", message: `research service returned ${res.status}` });
+
+      return await res.json();
+    } catch (error) {
+      return reply.code(503).send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  /**
+   * Put a bot under regime management, or change how it is managed.
+   *
+   * `baselineMaxCapital` defaults to the bot's current cap, so bringing a bot
+   * under management is by default a no-op: the governor starts from exactly
+   * where the operator left it and can only go down from there.
+   */
+  fastify.post("/actions/regime.setPolicy", async (request: AuthedRequest, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+
+    return control(request, reply, "regime.setPolicy", async (botId) => {
+      const bot = (await xprisma.bot.findUnique({ where: { id: botId }, select: { maxCapital: true, minProfit: true } })) as
+        | { maxCapital: number | null; minProfit: number | null }
+        | null;
+
+      if (!bot) throw new Error(`No bot ${botId}`);
+
+      const baseline = num(body.baselineMaxCapital) ?? bot.maxCapital;
+      const armed = body.armed === undefined ? true : body.armed !== false;
+      const floorFactor = Math.min(1, Math.max(0, num(body.floorFactor) ?? 0.1));
+      const maxAgeMs = num(body.maxAgeMs) ?? 93_600_000;
+
+      await xprisma.regimePolicy.upsert({
+        where: { botId },
+        create: {
+          botId,
+          baselineMaxCapital: baseline,
+          baselineMinProfit: bot.minProfit,
+          armed,
+          floorFactor,
+          maxAgeMs,
+        },
+        update: { baselineMaxCapital: baseline, armed, floorFactor, maxAgeMs },
+      });
+    });
+  });
+
+  /** Take a bot out of regime management entirely, restoring its baseline cap. */
+  fastify.post("/actions/regime.unmanage", async (request: AuthedRequest, reply) =>
+    control(request, reply, "regime.unmanage", async (botId) => {
+      const policy = (await xprisma.regimePolicy.findUnique({ where: { botId } })) as RegimePolicyRow | null;
+      if (!policy) throw new Error(`Bot ${botId} is not under regime management`);
+
+      if (policy.baselineMaxCapital !== null) {
+        await setBotLimits(botId, OWNER_ID, { maxCapital: policy.baselineMaxCapital });
+      }
+      await xprisma.regimePolicy.delete({ where: { botId } });
+    }),
+  );
+
+  /**
+   * The disarm switch: every managed bot back to its baseline, now.
+   *
+   * Deliberately does not take a botId — when an operator reaches for this,
+   * they want the whole fleet released, not one bot at a time.
+   */
+  fastify.post("/actions/regime.disarm", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) {
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.disarm", target: {}, outcome: "denied", detail: permission.reason! });
+
+      return reply.code(403).send({ error: "forbidden", message: permission.reason });
+    }
+
+    const result = await disarmRegime();
+    dashboardService.invalidate();
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.disarm", target: result, outcome: "allowed", detail: null });
+    logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" disarmed the regime governor`);
+
+    return { ok: true, ...result };
+  });
+
+  /** Force a reconcile without waiting out the poll interval. */
+  fastify.post("/actions/regime.sync", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const result = await syncRegime();
+    dashboardService.invalidate();
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.sync", target: result, outcome: "allowed", detail: null });
+
+    return { ok: true, ...result };
+  });
+
+  /** Ask the council to run now, out of schedule. */
+  fastify.post("/actions/regime.runNow", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const symbols = ((request.body ?? {}) as { symbols?: unknown }).symbols;
+    const ok = await requestResearchRun(Array.isArray(symbols) ? symbols.filter((s): s is string => typeof s === "string") : []);
+
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.runNow", target: { symbols }, outcome: ok ? "allowed" : "failed", detail: ok ? null : "research service unreachable" });
+
+    if (!ok) return reply.code(503).send({ error: "unavailable", message: "The research service did not accept the run." });
+
+    return { ok: true, queued: true };
   });
 }
