@@ -3,6 +3,8 @@ import { ITicker } from "@opentrader/types";
 
 export type SmartTradeContext = {
   ticker?: ITicker;
+  /** Short-window realized volatility proxy built from recent tickers. */
+  atr?: number;
 };
 
 export interface ISmartTradeExecutor {
@@ -23,5 +25,5 @@ export interface ISmartTradeExecutor {
   get status(): "Entering" | "Exiting" | "Finished";
 
   onOrderFilled?: (order: OrderWithSmartTrade) => Promise<boolean>;
-  onTicker?: (ticker: ITicker) => Promise<void>;
+  onTicker?: (ticker: ITicker, atr?: number) => Promise<void>;
 }

@@ -3,12 +3,13 @@ import type { SmartTradeWithOrders, ExchangeAccountWithCredentials } from "@open
 import type { IExchange } from "@opentrader/exchanges";
 import { exchangeProvider } from "@opentrader/exchanges";
 import { logger } from "@opentrader/logger";
-import { ITicker, XEntityType } from "@opentrader/types";
+import { ITicker, XEntityType, XOrderType } from "@opentrader/types";
 import type { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-executor.interface.js";
 import { OrderExecutor } from "../order/order.executor.js";
 import { decomposeSymbol } from "@opentrader/tools";
 import { canClearRef, shouldCancelOnStop } from "../stop-policy.js";
 import { allowsEntry, committedCapital, exitPriceForMinProfit, orderNotional, toBotLimits } from "../bot-limits.js";
+import { evaluateTrailing, type TrailingState } from "../../../trailing-policy.js";
 
 export class TradeExecutor implements ISmartTradeExecutor {
   smartTrade: SmartTradeWithOrders;
@@ -160,6 +161,8 @@ export class TradeExecutor implements ISmartTradeExecutor {
       return true;
     }
 
+    if (await this.applyAdaptiveTrailing(market)) return true;
+
     const stopLossActivated =
       market?.ticker && stopLossOrder?.stopPrice ? market.ticker.bid <= stopLossOrder.stopPrice : false;
     if (
@@ -194,8 +197,75 @@ export class TradeExecutor implements ISmartTradeExecutor {
     return this.next();
   }
 
-  async onTicker(ticker: ITicker) {
-    await this.next({ ticker });
+  async onTicker(ticker: ITicker, atr = 0) {
+    await this.next({ ticker, atr });
+  }
+
+  /**
+   * Optional, explicitly enabled adaptive exit. Fixed TP remains the default.
+   * State is persisted on Bot.state so a daemon restart cannot forget a peak.
+   */
+  private async applyAdaptiveTrailing(market?: SmartTradeContext): Promise<boolean> {
+    if (!market?.ticker || !this.smartTrade.botId || !market.atr) return false;
+
+    const entry = this.smartTrade.orders.find((order) => order.entityType === XEntityType.EntryOrder);
+    const takeProfit = this.smartTrade.orders.find((order) => order.entityType === XEntityType.TakeProfitOrder);
+    if (!entry || entry.status !== "Filled" || entry.filledPrice === null || !takeProfit || takeProfit.status !== "Placed") {
+      return false;
+    }
+
+    const bot = (await xprisma.bot.findUnique({
+      where: { id: this.smartTrade.botId },
+      select: { state: true, settings: true, minProfit: true },
+    })) as unknown as { state: unknown; settings: unknown; minProfit: number | null } | null;
+    if (!bot) return false;
+
+    const settings = typeof bot.settings === "string" ? JSON.parse(bot.settings) : bot.settings;
+    if (!settings?.adaptiveTrailing?.enabled) return false;
+
+    const rawState = typeof bot.state === "string" ? JSON.parse(bot.state) : bot.state;
+    const trailing: Record<string, TrailingState> = rawState?.adaptiveTrailing ?? {};
+    const previous = trailing[String(this.smartTrade.id)] ?? {
+      active: false,
+      highestPrice: entry.filledPrice,
+    };
+    const policy = settings.adaptiveTrailing;
+    const decision = evaluateTrailing(
+      previous,
+      {
+        entryPrice: entry.filledPrice,
+        quantity: entry.quantity,
+        entryFee: entry.fee ?? 0,
+        minProfit: bot.minProfit ?? policy.minProfit ?? 0,
+        exitFeeRate: policy.exitFeeRate ?? 0.0005,
+        atrMultiplier: policy.atrMultiplier ?? 1.5,
+        minTrailDistance: policy.minTrailDistance ?? 0,
+        activationAtrMultiple: policy.activationAtrMultiple ?? 0.5,
+      },
+      { price: market.ticker.last, atr: market.atr, timestamp: market.ticker.timestamp },
+    );
+
+    trailing[String(this.smartTrade.id)] = decision.state;
+    await xprisma.bot.update({ where: { id: this.smartTrade.botId }, data: { state: JSON.stringify({ ...rawState, adaptiveTrailing: trailing }) } });
+
+    if (decision.action === "exit") {
+      const executor = new OrderExecutor(takeProfit, this.exchange, this.smartTrade.symbol);
+      await executor.modify({ ...takeProfit, type: XOrderType.Market, price: null });
+      logger.info(`[AdaptiveTrailing] Market exit requested for [ST - ${this.smartTrade.id}] at ${market.ticker.last}.`);
+      return true;
+    }
+
+    if ((decision.action === "activate" || decision.action === "raise") && decision.state.trailPrice !== undefined) {
+      const runnerTarget = Math.max(takeProfit.price ?? 0, market.ticker.last + Math.max(market.atr * (policy.atrMultiplier ?? 1.5), policy.minTrailDistance ?? 0));
+      if (runnerTarget > (takeProfit.price ?? 0)) {
+        const executor = new OrderExecutor(takeProfit, this.exchange, this.smartTrade.symbol);
+        await executor.modify({ ...takeProfit, type: XOrderType.Limit, price: runnerTarget });
+        logger.info(`[AdaptiveTrailing] Raised TP for [ST - ${this.smartTrade.id}] to ${runnerTarget}; trail ${decision.state.trailPrice}.`);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /** The owning bot's limits, or none when the trade has no bot. */

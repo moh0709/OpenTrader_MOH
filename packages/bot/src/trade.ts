@@ -10,7 +10,7 @@ import { TickerChannel, TickerEvent } from "./channels/ticker/index.js";
 import { OrderEvent, OrdersStream } from "./streams/orders.stream.js";
 
 type TradeUpdatedEvent = { type: "onTradeUpdated" };
-type TickerChangeEvent = { type: "onTickerChange"; ticker: ITicker };
+type TickerChangeEvent = { type: "onTickerChange"; ticker: ITicker; atr: number };
 type ExchangeEvent = OrderEvent | TickerChangeEvent | TradeUpdatedEvent;
 type QueueEvent = ExchangeEvent & { smartTrade: SmartTradeWithOrders };
 
@@ -20,6 +20,7 @@ export class Trade {
   queue: QueueObject<QueueEvent>;
   tickerChannel: TickerChannel;
   destroyed = false;
+  private recentPrices: number[] = [];
 
   constructor(
     public smartTrade: SmartTradeWithOrders,
@@ -95,7 +96,7 @@ export class Trade {
         await executor.onOrderFilled?.(event.order);
         break;
       case "onTickerChange":
-        await executor.onTicker?.(event.ticker);
+        await executor.onTicker?.(event.ticker, event.atr);
         break;
       case "onTradeUpdated":
         await executor.next();
@@ -117,7 +118,11 @@ export class Trade {
   };
 
   handleTickerEvent = async (event: TickerEvent) => {
-    void this.queue.push({ type: "onTickerChange", ticker: event.ticker, smartTrade: this.smartTrade });
+    this.recentPrices.push(event.ticker.last);
+    if (this.recentPrices.length > 21) this.recentPrices.shift();
+    const changes = this.recentPrices.slice(1).map((price, i) => Math.abs(price - this.recentPrices[i]!));
+    const atr = changes.length > 0 ? changes.reduce((sum, value) => sum + value, 0) / changes.length : 0;
+    void this.queue.push({ type: "onTickerChange", ticker: event.ticker, atr, smartTrade: this.smartTrade });
   };
 
   private async pull() {
