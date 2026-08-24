@@ -1045,7 +1045,29 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
   overflow: hidden;
 }
 
-.cv-card__foot { margin-top: auto; font-size: 11px; }
+.cv-card__foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+.cv-card__open { flex: none; }
+
+.cv-timeline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.cv-timeline > .muted:first-child, .cv-timeline > .muted:last-child { flex: none; }
+
+/* Discrete readings, one block each. Depth of conviction is opacity, so a
+   strong_sell reads heavier than a hesitant sell without a second legend. */
+.cv-strip { flex: 1; display: flex; gap: 2px; }
+.cv-strip__block {
+  flex: 1;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--gridline);
+}
+.cv-strip__block--bull { background: var(--good); }
+.cv-strip__block--bear { background: var(--critical); }
+.cv-strip__block--neutral { background: var(--baseline); }
 
 /* Tables read row by row; a hover band keeps your place. */
 .table tbody tr { transition: background var(--speed-fast) var(--ease); }

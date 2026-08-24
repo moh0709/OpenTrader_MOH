@@ -90,6 +90,15 @@ const FIXTURES = {
       },
     ],
   },
+  "regime/history?limit=30": {
+    history: {
+      "BTC/USDT": [
+        { stance: "hold", confidence: 0.5, asOf: NOW - 3 * 86_400_000 },
+        { stance: "sell", confidence: 0.7, asOf: NOW - 2 * 86_400_000 },
+        { stance: "strong_sell", confidence: 0.9, asOf: NOW },
+      ],
+    },
+  },
   "regime/runs?limit=40": {
     runs: [
       {
@@ -180,6 +189,11 @@ describe("Research widgets reach the container", () => {
     // The fixture is strong_sell at 90% confidence: both must be visible.
     expect(rendered.some((t) => t.includes("Strong sell"))).toBe(true);
     expect(rendered.some((t) => t.includes("90%"))).toBe(true);
+
+    // History arrived too, so the card offers the argument behind the reading.
+    expect(rendered.some((t) => t.includes("History"))).toBe(true);
+    expect(rendered.some((t) => t.includes("3 readings"))).toBe(true);
+    expect(rendered.some((t) => t.includes("Transcript →"))).toBe(true);
   });
 
   it("shows both sides of the debate in the Research Room split view", async () => {

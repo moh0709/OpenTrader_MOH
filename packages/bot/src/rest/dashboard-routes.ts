@@ -138,6 +138,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
       { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
       { path: "GET /api/dash/regime", params: {}, description: "Research convictions per symbol and the capital cap the governor holds each bot at." },
+      { path: "GET /api/dash/regime/history", params: { limit: "1-200" }, description: "Conviction history per symbol, oldest first, for drawing how the council changed its mind." },
       { path: "GET /api/dash/regime/transcript", params: { symbol: "string" }, description: "The full analyst reports and bull/bear debate behind a symbol's latest conviction." },
       { path: "GET /api/dash/regime/runs", params: { limit: "1-200" }, description: "Recent research runs with cost and duration." },
       { path: "GET /api/dash/shares", params: {}, description: "Share links, their status and who is watching." },
@@ -648,6 +649,37 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     return { convictions: Object.values(convictions), bots: managed };
   });
+
+  /**
+   * Conviction history, oldest first, so the dashboard can draw the council
+   * changing its mind rather than only repeating its latest word.
+   *
+   * One call returns every symbol's timeline; the card grid fetches it once
+   * instead of once per symbol. Rows beyond `limit` per symbol are dropped —
+   * the runs are twice daily, so 30 covers a month, which is longer than any
+   * regime worth watching has ever lasted.
+   */
+  fastify.get("/regime/history", async (request) => {
+    const limit = Math.min(Math.max(num((request.query as Record<string, unknown>).limit) ?? 30, 1), 200);
+    const rows = (await xprisma.regimeConviction.findMany({
+      orderBy: { asOf: "desc" },
+      take: limit * 10,
+    })) as RegimeConvictionRow[];
+
+    const bySymbol = new Map<string, { stance: string; confidence: number; asOf: number }[]>();
+    for (const row of rows) {
+      const list = bySymbol.get(row.symbol) ?? [];
+      if (list.length >= limit) continue;
+      list.push({ stance: row.stance, confidence: row.confidence, asOf: Number(row.asOf) });
+      bySymbol.set(row.symbol, list);
+    }
+
+    const history: Record<string, unknown[]> = {};
+    for (const [symbol, list] of bySymbol) history[symbol] = list.reverse();
+
+    return { history };
+  });
+
 
   /** The full debate behind one symbol's conviction, proxied from the council. */
   fastify.get("/regime/transcript", async (request, reply) => {

@@ -131,6 +131,47 @@ export const convictionBoardWidget = {
         return mount(ctx.body, emptyState("No convictions yet. The council has not produced a reading for any symbol."));
       }
 
+      // History is one call for every symbol and is drawn best-effort: a
+      // missing timeline dims nothing about the card itself.
+      let history = {};
+      try {
+        history = (await dash("regime/history?limit=30"))?.history ?? {};
+      } catch {
+        // No timeline this render; the cards stand on their own.
+      }
+
+      /**
+       * A stance maps onto -2..+2 so the timeline reads left-to-right as the
+       * council changing its mind. Drawn as discrete blocks rather than a
+       * continuous line on purpose: the council speaks twice a day, and a line
+       * would invent readings between the ones that actually happened.
+       */
+      const STANCE_VALUE = { strong_sell: -2, sell: -1, hold: 0, buy: 1, strong_buy: 2 };
+
+      const timeline = (symbol) => {
+        const rows = history[symbol] ?? [];
+        if (rows.length < 2) return null;
+
+        return el("div", { class: "cv-timeline", role: "img", "aria-label": `Stance history for ${symbol}` }, [
+          el("span", { class: "muted", text: "History" }),
+          el(
+            "div",
+            { class: "cv-strip" },
+            rows.map((r) => {
+              const tone = stanceTone(r.stance) === "neg" ? "bear" : r.stance === "hold" ? "neutral" : "bull";
+              const depth = Math.abs(STANCE_VALUE[r.stance] ?? 0);
+
+              return el("span", {
+                class: `cv-strip__block cv-strip__block--${tone}`,
+                style: { opacity: String(0.35 + 0.65 * (depth / 2)) },
+                title: `${timeAgo(r.asOf)}: ${STANCE_LABEL[r.stance] ?? r.stance} @ ${Math.round(r.confidence * 100)}%`,
+              });
+            }),
+          ),
+          el("span", { class: "muted", text: `${rows.length} readings` }),
+        ]);
+      };
+
       /**
        * A stance is a position on a five-stop scale, so it is drawn as one:
        * five segments, the current stance lit. Bullish lights green but stays
@@ -168,8 +209,22 @@ export const convictionBoardWidget = {
               el("span", { class: "rsrch-num", text: `${confidence}%` }),
             ]),
             el("p", { class: "cv-card__summary muted", text: c.summary || "—" }),
+            timeline(c.symbol),
             el("div", { class: "cv-card__foot" }, [
               stale ? badge(`${timeAgo(c.asOf)} — stale`, "warn") : el("span", { class: "muted", text: timeAgo(c.asOf) }),
+              // One click from the reading to the argument behind it. The event
+              // hops to app.js because importing layout here would be a cycle
+              // (layout imports the widget catalogue).
+              el("button", {
+                class: "btn btn--sm cv-card__open",
+                type: "button",
+                text: "Transcript →",
+                title: `Open the Research Room on ${c.symbol}`,
+                onclick: () =>
+                  document.dispatchEvent(
+                    new CustomEvent("opentrader:add-widget", { detail: { type: "researchRoom", config: { symbol: c.symbol } } }),
+                  ),
+              }),
             ]),
           ]);
         });

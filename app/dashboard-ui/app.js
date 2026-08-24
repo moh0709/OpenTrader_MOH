@@ -141,6 +141,14 @@ function bindChrome() {
       openPalette();
     }
   });
+
+  // Widgets that need to place another widget (a conviction card opening the
+  // Research Room) ask through this event rather than importing layout
+  // directly - layout imports the catalogue, so the import would be a cycle.
+  document.addEventListener("opentrader:add-widget", (event) => {
+    const { type, config } = event.detail ?? {};
+    if (type) addWidget(type, config);
+  });
 }
 
 /**
