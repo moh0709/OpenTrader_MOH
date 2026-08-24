@@ -966,3 +966,93 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
   .topbar__hero-value { transition: none; }
 }
 
+/* ---------- Council conviction cards ---------- */
+
+.cv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.cv-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition:
+    border-color var(--speed-fast) var(--ease),
+    box-shadow var(--speed-fast) var(--ease);
+}
+.cv-card:hover {
+  border-color: color-mix(in srgb, var(--series-1) 25%, var(--border));
+  box-shadow: var(--shadow-1);
+}
+
+/* A stale reading is still shown - it is the last thing the council said -
+   but its card dims so nobody mistakes it for this morning's view. */
+.cv-card--stale { opacity: 0.72; }
+
+.cv-card__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cv-card__symbol { font-weight: 600; font-size: 13px; letter-spacing: 0.01em; }
+.cv-card__stance { font-size: 12px; font-weight: 600; }
+.cv-card__stance.neg { color: var(--critical); }
+
+/* Five stops, one lit. Bear carries the reserved critical colour; bull uses
+   the good colour at rest but softer, because it moves nothing. */
+.cv-meter { display: flex; gap: 3px; }
+.cv-meter__seg {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--gridline);
+  transition: background var(--speed-move) var(--ease);
+}
+.cv-meter__seg--bull { background: var(--good); box-shadow: 0 0 8px rgb(from var(--good) r g b / 0.4); }
+.cv-meter__seg--bear { background: var(--critical); box-shadow: 0 0 8px rgb(from var(--critical) r g b / 0.45); }
+.cv-meter__seg--neutral { background: var(--baseline); }
+
+.cv-card__confidence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.cv-card__confidence > .muted { flex: none; }
+.cv-bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--gridline);
+  overflow: hidden;
+}
+.cv-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--seq-250), var(--seq-550));
+}
+
+.cv-card__summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cv-card__foot { margin-top: auto; font-size: 11px; }
+
+/* Tables read row by row; a hover band keeps your place. */
+.table tbody tr { transition: background var(--speed-fast) var(--ease); }
+.table tbody tr:hover { background: color-mix(in srgb, var(--series-1) 5%, transparent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cv-meter__seg, .cv-card, .cv-bar__fill { transition: none; }
+}
+
+

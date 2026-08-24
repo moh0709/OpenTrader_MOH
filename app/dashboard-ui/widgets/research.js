@@ -131,39 +131,52 @@ export const convictionBoardWidget = {
         return mount(ctx.body, emptyState("No convictions yet. The council has not produced a reading for any symbol."));
       }
 
-      const rows = convictions
+      /**
+       * A stance is a position on a five-stop scale, so it is drawn as one:
+       * five segments, the current stance lit. Bullish lights green but stays
+       * visually quiet (it moves nothing); bearish carries the serious colour,
+       * because only the bearish half does something to the fleet.
+       */
+      const STANCES = ["strong_sell", "sell", "hold", "buy", "strong_buy"];
+      const meter = (stance) =>
+        el("div", { class: "cv-meter", role: "img", "aria-label": `Stance: ${STANCE_LABEL[stance] ?? stance}` },
+          STANCES.map((step) => {
+            const tone =
+              step === stance ? (stanceTone(step) === "neg" ? "bear" : step === "hold" ? "neutral" : "bull") : "";
+            return el("span", { class: `cv-meter__seg${tone ? ` cv-meter__seg--${tone}` : ""}` });
+          }),
+        );
+
+      const cards = convictions
         .slice()
         .sort((a, b) => a.symbol.localeCompare(b.symbol))
         .map((c) => {
           const stale = c.ageMs > STALE_MS;
+          const confidence = Math.round((c.confidence ?? 0) * 100);
 
-          return el("tr", {}, [
-            el("td", { class: "rsrch-mono", text: c.symbol }),
-            el("td", {}, [el("span", { class: stanceTone(c.stance), text: STANCE_LABEL[c.stance] ?? c.stance })]),
-            // Confidence is the depth of any reduction, so it belongs beside
-            // the stance rather than buried in the summary.
-            el("td", { class: "rsrch-num", text: `${Math.round((c.confidence ?? 0) * 100)}%` }),
-            el("td", {}, [
+          return el("div", { class: `cv-card${stale ? " cv-card--stale" : ""}` }, [
+            el("div", { class: "cv-card__head" }, [
+              el("span", { class: "rsrch-mono cv-card__symbol", text: c.symbol }),
+              el("span", { class: `cv-card__stance ${stanceTone(c.stance)}`.trim(), text: STANCE_LABEL[c.stance] ?? c.stance }),
+            ]),
+            meter(c.stance),
+            el("div", { class: "cv-card__confidence" }, [
+              el("span", { class: "muted", text: "Confidence" }),
+              el("span", { class: "cv-bar", title: `${confidence}%` }, [
+                el("span", { class: "cv-bar__fill", style: { width: `${confidence}%` } }),
+              ]),
+              el("span", { class: "rsrch-num", text: `${confidence}%` }),
+            ]),
+            el("p", { class: "cv-card__summary muted", text: c.summary || "—" }),
+            el("div", { class: "cv-card__foot" }, [
               stale ? badge(`${timeAgo(c.asOf)} — stale`, "warn") : el("span", { class: "muted", text: timeAgo(c.asOf) }),
             ]),
-            el("td", { class: "rsrch-wrap muted", text: c.summary || "—" }),
           ]);
         });
 
       panel(ctx.body, [
         note("A bullish or neutral reading changes nothing: the governor is only able to reduce risk, never add it."),
-        el("table", { class: "table" }, [
-          el("thead", {}, [
-            el("tr", {}, [
-              el("th", { text: "Symbol" }),
-              el("th", { text: "Stance" }),
-              el("th", { text: "Confidence" }),
-              el("th", { text: "As of" }),
-              el("th", { text: "Summary" }),
-            ]),
-          ]),
-          el("tbody", {}, rows),
-        ]),
+        el("div", { class: "cv-grid" }, cards),
       ]);
     };
 

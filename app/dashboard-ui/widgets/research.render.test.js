@@ -171,6 +171,17 @@ describe("Research widgets reach the container", () => {
     }
   });
 
+  it("renders each conviction as a stance-meter card, not a bare number", async () => {
+    const { researchWidgets } = await import("./research.js");
+    const board = researchWidgets.find((w) => w.id === "convictionBoard");
+
+    const rendered = await renderWidget(board);
+
+    // The fixture is strong_sell at 90% confidence: both must be visible.
+    expect(rendered.some((t) => t.includes("Strong sell"))).toBe(true);
+    expect(rendered.some((t) => t.includes("90%"))).toBe(true);
+  });
+
   it("shows both sides of the debate in the Research Room split view", async () => {
     const { researchWidgets } = await import("./research.js");
     const room = researchWidgets.find((w) => w.id === "researchRoom");
