@@ -24,6 +24,7 @@ import { groupedCatalog } from "./widgets/index.js";
 import { el, mount } from "./lib/dom.js";
 import { money, timeAgo } from "./lib/format.js";
 import { fetchWatchers, renderShareManager, shareToken, startLiveFeed } from "./lib/share.js";
+import { openCommandPalette } from "./lib/command-palette.js";
 import { markRising, mountTicker, toTickerItems } from "./lib/ticker.js";
 import { query } from "./lib/api.js";
 
@@ -130,6 +131,61 @@ function bindChrome() {
       closeDrawer("share");
     }
   });
+
+  // The palette is the keyboard way into everything on this page. Ctrl+K /
+  // Cmd+K opens it; the topbar button is there so it can be discovered.
+  document.querySelector("[data-open-palette]").addEventListener("click", () => openPalette());
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      openPalette();
+    }
+  });
+}
+
+/**
+ * Everything reachable without touching the mouse. Built fresh on every open:
+ * which widgets are already placed changes as the board does.
+ */
+function openPalette() {
+  const refreshLabel = store.settings.refreshMs === 0 ? "Resume auto-refresh" : "Pause auto-refresh";
+
+  const actions = [
+    ...groupedCatalog().entries().flatMap(([group, widgets]) =>
+      widgets.map((widget) => ({
+        label: `Add ${widget.name ?? widget.id}`,
+        hint: instanceCount(widget.id) > 0 ? "on board" : undefined,
+        section: "Add widget",
+        keywords: [group],
+        run: () => addWidget(widget.id),
+      })),
+    ),
+    ...Object.keys(PRESETS).map((name) => ({
+      label: `Switch to ${name[0].toUpperCase()}${name.slice(1)} view`,
+      section: "View",
+      keywords: ["preset", "layout", "board"],
+      run: () => applyPreset(name),
+    })),
+    { label: "Reset board to default layout", section: "View", keywords: ["layout"], run: resetLayout },
+    { label: "Add a widget (browse all)", section: "View", run: () => openDrawer("catalog") },
+    { label: "Toggle light / dark theme", section: "View", keywords: ["appearance"], run: toggleTheme },
+    { label: "Go to cross-venue arbitrage", section: "View", keywords: ["scan"], run: () => focusGroup("arbitrage") },
+    { label: "Refresh now", section: "Data", hint: "Ctrl+R also works", run: () => void tick({ force: true }) },
+    {
+      label: refreshLabel,
+      section: "Data",
+      keywords: ["pause", "resume"],
+      run: () => {
+        store.updateSettings({ refreshMs: store.settings.refreshMs === 0 ? 5000 : 0 });
+        schedule();
+        document.querySelector("[data-refresh-select]").value = String(store.settings.refreshMs);
+      },
+    },
+    { label: "Share this dashboard", section: "Settings", run: () => openDrawer("share") },
+    { label: "Open settings", section: "Settings", run: () => openDrawer("settings") },
+  ];
+
+  void openCommandPalette(() => actions);
 }
 
 function openDrawer(which) {
