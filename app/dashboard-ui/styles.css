@@ -231,6 +231,62 @@ button, input, select { font: inherit; color: inherit; }
 .input { width: 100%; padding: 9px 11px; }
 .input:focus-visible, .select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
 
+/* ---------- Tabs ----------
+   One board per tab. The bar sits directly on the page rather than in a card:
+   it is a place indicator, not a control panel, and giving it a surface of its
+   own would make it compete with the widgets underneath. */
+
+.tabs {
+  display: flex; align-items: flex-end; gap: 2px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tabs::-webkit-scrollbar { height: 4px; }
+.tabs::-webkit-scrollbar-thumb { background: var(--baseline); border-radius: 2px; }
+
+.tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: none;
+  padding: 8px 14px;
+  border: 1px solid transparent; border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent; color: var(--text-secondary);
+  font: inherit; font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  /* Sit on the bar's own border so the active tab joins the board below it. */
+  margin-bottom: -1px;
+  transition: background var(--speed-fast) var(--ease), color var(--speed-fast) var(--ease);
+}
+.tab:hover { background: var(--surface-2); color: var(--text-primary); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.tab[data-active="true"] {
+  background: var(--surface-1);
+  border-color: var(--border);
+  color: var(--text-primary);
+  font-weight: 600;
+  /* Cover the bar's border, which is what makes the tab look attached. */
+  box-shadow: 0 1px 0 0 var(--surface-1);
+}
+
+.tab--add { color: var(--text-muted); font-size: 15px; padding: 8px 11px; }
+
+/* A tab with something new on it. Paired with a title and an aria-label, so the
+   dot is a second signal rather than the only one. */
+.tab__dot {
+  width: 6px; height: 6px; flex: none;
+  border-radius: 50%;
+  background: var(--series-2);
+}
+
+@media (max-width: 720px) {
+  .tabs { padding: 0 10px; }
+  .tab { padding: 8px 10px; font-size: 12px; }
+}
+
 /* ---------- Widget grid ---------- */
 
 .grid {
@@ -607,7 +663,7 @@ button, input, select { font: inherit; color: inherit; }
 
 .ticker {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: stretch;
   height: var(--ticker-h); padding: 0 12px;
   background: var(--ticker-bg); color: var(--ticker-ink);
   border-top: 1px solid rgba(0, 0, 0, 0.25);
@@ -617,12 +673,50 @@ button, input, select { font: inherit; color: inherit; }
 
 .ticker[hidden] { display: none; }
 
+/* Two lanes. The trade side gets the larger share: it carries six figures per
+   line, the AI side three. */
+.ticker__lane {
+  display: flex; align-items: center; gap: 12px;
+  min-width: 0; flex: 55 1 0;
+}
+.ticker__lane[hidden] { display: none; }
+
+/* The divider is drawn on the AI lane rather than as its own element, so a
+   hidden lane takes its separator with it. */
+.ticker__lane--ai {
+  flex: 45 1 0;
+  margin-left: 12px; padding-left: 12px;
+  border-left: 1px solid rgba(0, 0, 0, 0.28);
+}
+
 .ticker__tag {
   flex: none;
   padding: 4px 8px; border-radius: 3px;
   background: var(--ticker-ink); color: var(--ticker-bg);
   font-size: 11px; font-weight: 700; letter-spacing: .08em;
 }
+
+/* The AI lane's tag is outlined rather than filled, so the two lanes read as
+   the same bar with two subjects instead of two competing headlines. */
+.ticker__tag--ai {
+  background: transparent; color: var(--ticker-ink);
+  box-shadow: inset 0 0 0 1.5px var(--ticker-ink);
+}
+
+/* Chips on the bar are their own thing: the board's chip palette is tuned for a
+   page background and would be near-invisible on yellow. */
+.ticker__chip {
+  flex: none;
+  padding: 2px 6px; border-radius: 999px;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+  font-size: 10px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.ticker__chip[data-chip="close"],
+.ticker__chip[data-chip="take-profit"] { color: var(--ticker-up); }
+.ticker__chip[data-chip="risk"],
+.ticker__chip[data-chip="cap"] { color: var(--ticker-down); }
+.ticker__chip--auto { background: var(--ticker-down); color: var(--ticker-bg); box-shadow: none; }
 
 /* The window the item slides into. Hides the item's starting offset. */
 .ticker__view { flex: 1; overflow: hidden; min-width: 0; }
@@ -661,8 +755,17 @@ body:has(.ticker:not([hidden])) .grid { padding-bottom: calc(var(--ticker-h) + 1
 body:has(.ticker:not([hidden])) .toasts { bottom: calc(var(--ticker-h) + 16px); }
 body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
 
+/* Below this the two lanes are each too narrow to finish a sentence, so the
+   trade lane takes the whole bar back. The AI lane's content is not lost - the
+   action window on the AI tab is the full record. */
+@media (max-width: 900px) {
+  .ticker__lane--ai { display: none; }
+  .ticker__lane { flex: 1; }
+}
+
 @media (max-width: 640px) {
-  .ticker { font-size: 12px; gap: 8px; }
+  .ticker { font-size: 12px; }
+  .ticker__lane { gap: 8px; }
   .ticker__tag { font-size: 10px; padding: 3px 6px; }
   /* On a phone the count is the first thing worth losing. */
   .ticker__count { display: none; }
@@ -1102,6 +1205,285 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
 }
 .ais-message--error { color: var(--critical); }
 .ais-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+
+/* ---------- Model picker ----------
+   A list rather than a datalist: OpenRouter alone offers several hundred
+   models, and the one distinction most people are making - does this cost
+   anything - is invisible in a bare list of ids. */
+
+.ais-combo { display: flex; gap: 6px; align-items: stretch; }
+.ais-combo .input { flex: 1; min-width: 0; }
+.ais-toggle { flex: none; align-self: stretch; }
+
+.ais-picker {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.ais-picker[hidden] { display: none; }
+
+.ais-filters {
+  display: flex; gap: 6px; align-items: center;
+  padding: 8px; border-bottom: 1px solid var(--border);
+}
+.ais-filters .input { flex: 1; min-width: 0; }
+.input--sm { padding: 5px 8px; font-size: 12px; }
+
+/* The list is capped rather than growing the drawer: the fields below it -
+   Save, and the disable switch - must stay reachable without scrolling past
+   three hundred models to find them. */
+.ais-list { max-height: 260px; overflow-y: auto; }
+
+.ais-option {
+  display: block; width: 100%;
+  padding: 7px 10px;
+  border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--text-primary);
+  text-align: left; cursor: pointer;
+  font: inherit;
+  transition: background var(--speed-fast) var(--ease);
+}
+.ais-option:last-child { border-bottom: 0; }
+.ais-option:hover,
+.ais-option[data-active="true"] { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
+.ais-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.ais-option__main { display: flex; align-items: center; gap: 6px; }
+.ais-option__name { font-size: 12.5px; font-weight: 600; }
+.ais-option__ctx {
+  margin-left: auto; flex: none;
+  font-size: 10.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ais-option__id {
+  margin-top: 1px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.ais-empty { padding: 12px 10px; font-size: 12px; color: var(--text-muted); }
+
+/* ---------- Chips ----------
+   One vocabulary, shared by the model picker, the AI action feed, the info
+   bubbles and the news lane. Every chip carries its word: the colour is a
+   second signal, never the only one. */
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--text-secondary);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.03em; text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.chip--filter {
+  cursor: pointer;
+  padding: 4px 9px;
+  font-size: 10.5px;
+  transition: background var(--speed-fast) var(--ease), border-color var(--speed-fast) var(--ease);
+}
+.chip--filter:hover { border-color: color-mix(in srgb, var(--series-1) 45%, var(--border)); }
+.chip--filter[data-on="true"] {
+  background: color-mix(in srgb, var(--series-3) 18%, transparent);
+  border-color: color-mix(in srgb, var(--series-3) 55%, transparent);
+  color: var(--good-text);
+}
+.chip--filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.chip--free {
+  color: var(--good-text);
+  border-color: color-mix(in srgb, var(--series-3) 45%, transparent);
+  background: color-mix(in srgb, var(--series-3) 10%, transparent);
+}
+
+:root[data-theme="dark"] .chip--filter[data-on="true"],
+:root[data-theme="dark"] .chip--free { color: var(--series-3); }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .chip--filter[data-on="true"],
+  :root:not([data-theme="light"]) .chip--free { color: var(--series-3); }
+}
+
+/* One colour per kind of AI action. The chip always carries its word, so this
+   is a second signal and never the only one. */
+.chip[data-chip="analysis"],
+.chip[data-chip="decision"] { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 40%, transparent); }
+.chip[data-chip="open"] { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 55%, transparent); }
+.chip[data-chip="close"],
+.chip[data-chip="take-profit"] { color: var(--good-text); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+.chip[data-chip="risk"],
+.chip[data-chip="cap"] { color: var(--serious); border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
+.chip[data-chip="learning"] { color: var(--series-2); border-color: color-mix(in srgb, var(--series-2) 45%, transparent); }
+.chip[data-chip="denied"] { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 50%, transparent); }
+
+/* Something the AI did unattended. Deliberately the loudest chip on the page. */
+.chip--auto {
+  color: var(--critical);
+  border-color: var(--critical);
+  background: color-mix(in srgb, var(--critical) 12%, transparent);
+}
+
+:root[data-theme="dark"] .chip[data-chip="close"],
+:root[data-theme="dark"] .chip[data-chip="take-profit"] { color: var(--series-3); }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .chip[data-chip="close"],
+  :root:not([data-theme="light"]) .chip[data-chip="take-profit"] { color: var(--series-3); }
+}
+
+/* ---------- Spotlight ----------
+   The ring on whatever the AI just touched, and the note beside it. */
+
+.is-ai-target {
+  position: relative;
+  outline: 2px solid var(--series-2);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--series-2) 12%, transparent) !important;
+}
+
+.spot {
+  position: fixed; z-index: 60;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 8px 11px;
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-3);
+  opacity: 0; transform: translateY(4px);
+  transition: opacity var(--speed-move) var(--ease), transform var(--speed-move) var(--ease);
+  pointer-events: none;
+}
+.spot[hidden] { display: none; }
+.spot--in { opacity: 1; transform: none; }
+
+.spot[data-severity="success"] { border-left-color: var(--good); }
+.spot[data-severity="warning"] { border-left-color: var(--warning); }
+.spot[data-severity="danger"] { border-left-color: var(--critical); }
+.spot[data-severity="info"] { border-left-color: var(--series-1); }
+
+.spot__head { display: flex; align-items: center; gap: 6px; }
+.spot__title { font-size: 12.5px; font-weight: 600; }
+.spot__detail { margin-top: 3px; font-size: 12px; color: var(--text-secondary); line-height: 1.45; }
+
+/* Reduced motion loses the movement, not the message. */
+@media (prefers-reduced-motion: reduce) {
+  .spot { transition: opacity var(--speed-fast) var(--ease); transform: none; }
+  .spot--in { transform: none; }
+}
+
+/* ---------- Autopilot banner ----------
+   On screen for exactly as long as the AI may act without asking. It is loud on
+   purpose: this is the one state of the dashboard where not noticing has a cost
+   measured in real orders. */
+
+.autopilot {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 18px 0; padding: 8px 12px;
+  border: 1px solid var(--critical);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--critical) 10%, transparent);
+  font-size: 12.5px;
+}
+.autopilot[hidden] { display: none; }
+.autopilot__text { color: var(--text-secondary); }
+.autopilot .btn { margin-left: auto; }
+
+.autopilot__dot {
+  width: 8px; height: 8px; flex: none;
+  border-radius: 50%; background: var(--critical);
+  animation: autopilot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes autopilot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .autopilot__dot { animation: none; }
+}
+
+@media (max-width: 720px) {
+  .autopilot { margin: 0 10px; }
+  .autopilot__text { display: none; }
+}
+
+/* ---------- AI action window ---------- */
+
+.aia { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; }
+.aia-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.aia-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+
+.aia-row {
+  display: block; width: 100%;
+  padding: 7px 10px 7px 12px;
+  border: 0; border-left: 3px solid var(--border);
+  background: transparent; color: var(--text-primary);
+  text-align: left; cursor: pointer; font: inherit;
+  transition: background var(--speed-fast) var(--ease);
+}
+.aia-row:hover { background: var(--surface-2); }
+.aia-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.aia-row[data-severity="success"] { border-left-color: var(--good); }
+.aia-row[data-severity="warning"] { border-left-color: var(--warning); }
+.aia-row[data-severity="danger"] { border-left-color: var(--critical); }
+.aia-row[data-severity="info"] { border-left-color: var(--series-1); }
+.aia-row[data-autonomous="true"] { background: color-mix(in srgb, var(--critical) 5%, transparent); }
+
+.aia-row__head { display: flex; align-items: center; gap: 6px; }
+.aia-row__title { font-size: 12.5px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.aia-row__time { margin-left: auto; flex: none; font-size: 10.5px; color: var(--text-muted); }
+.aia-row__detail { margin-top: 2px; font-size: 12px; color: var(--text-secondary); }
+.aia-row__who { margin-top: 2px; font-size: 10.5px; color: var(--text-muted); }
+
+/* ---------- AI chat ---------- */
+
+.chat { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 240px; }
+.chat__thread { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+
+.chat__msg { max-width: 92%; }
+.chat__msg[data-role="user"] { align-self: flex-end; }
+.chat__msg-text {
+  padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat__msg[data-role="user"] .chat__msg-text {
+  background: color-mix(in srgb, var(--series-1) 12%, transparent);
+  border-color: color-mix(in srgb, var(--series-1) 30%, transparent);
+}
+
+.chat__status { min-height: 16px; font-size: 11px; color: var(--text-muted); }
+.chat__status[data-tone="danger"] { color: var(--critical); }
+
+.chat__composer { display: flex; gap: 8px; align-items: flex-start; }
+.chat__input { flex: 1; min-width: 0; resize: vertical; font: inherit; font-size: 12.5px; }
+.chat__composer-side { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.chat__auto { justify-content: center; }
+
+/* A proposal is a decision, so it is drawn as a card rather than a line of
+   text: the button next to it places a real order. */
+.chat__proposal {
+  margin-top: 6px; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--series-2) 40%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--series-2) 7%, transparent);
+}
+.chat__proposal-head { display: flex; align-items: center; gap: 6px; }
+.chat__proposal-what { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.chat__proposal-why { margin-top: 3px; font-size: 12px; color: var(--text-secondary); }
+.chat__proposal-row { display: flex; gap: 6px; margin-top: 8px; }
+.chat__warn { margin-top: 4px; font-size: 11.5px; color: var(--serious); }
+.chat__done { font-size: 12px; color: var(--good-text); }
+.chat__failed { font-size: 12px; color: var(--critical); }
 .btn--ai {
   color: var(--accent-strong);
   border-color: color-mix(in srgb, var(--series-1) 35%, var(--border));

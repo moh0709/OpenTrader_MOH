@@ -10,7 +10,7 @@
  * GUARDRAILS and only within their bounds; apply clamps before writing. So even
  * a bad day for the analyser cannot raise a position cap to 10x.
  */
-import { createReflector } from "@opentrader/ai-team";
+import { createReflector, recordAiAction } from "@opentrader/ai-team";
 import { xprisma } from "@opentrader/db";
 import { logger } from "@opentrader/logger";
 
@@ -176,6 +176,15 @@ export async function evaluateLearning(ownerId: number): Promise<EvaluateResult>
 
       created += 1;
       logger.info(`[Learning] Bot ${bot.id} (${bot.name}): loss streak of ${streak} recorded, proposal opened.`);
+
+      recordAiAction({
+        chip: "learning",
+        title: `Post-mortem on ${bot.name}`,
+        detail: `${streak} losing cycles in a row on ${bot.symbol}. A proposal is waiting for you — nothing has changed yet.`,
+        botId: bot.id,
+        botName: bot.name,
+        symbol: bot.symbol,
+      });
     } catch (error) {
       logger.warn(`[Learning] Could not evaluate bot ${bot.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -201,6 +210,13 @@ function clampProposal(proposal: Record<string, unknown>): Record<string, number
   if (Object.keys(applied).length === 0) throw new Error("Proposal is empty");
   return applied;
 }
+
+/** What an apply changed, so the caller can report it without re-reading the row. */
+export type ApplyResult = {
+  id: number;
+  /** The clamped values actually written, keyed by setting name. */
+  applied: Record<string, number>;
+};
 
 /** Apply a proposal to the bot's template settings, snapshotting what was there. */
 export async function applyLearning(entryId: number, ownerId: number): Promise<ApplyResult> {
@@ -236,6 +252,16 @@ export async function applyLearning(entryId: number, ownerId: number): Promise<A
   });
 
   logger.info(`[Learning] Entry ${entryId} applied to bot ${entry.botId}: ${JSON.stringify(applied)}`);
+
+  recordAiAction({
+    chip: "adjust",
+    title: `Settings changed on bot ${entry.botId}`,
+    detail: `Lesson applied: ${Object.entries(applied)
+      .map(([key, value]) => `${key} → ${value}`)
+      .join(", ")}.`,
+    botId: entry.botId,
+  });
+
   return { id: entryId, applied };
 }
 
@@ -265,6 +291,14 @@ export async function revertLearning(entryId: number, ownerId: number): Promise<
   await xprisma.learningJournal.update({ where: { id: entryId }, data: { status: "reverted", resolvedAt: new Date() } });
 
   logger.info(`[Learning] Entry ${entryId} reverted for bot ${entry.botId}.`);
+
+  recordAiAction({
+    chip: "adjust",
+    title: `Settings restored on bot ${entry.botId}`,
+    detail: "The lesson was undone and the bot is back on the settings it had before it was applied.",
+    botId: entry.botId,
+  });
+
   return { id: entryId };
 }
 

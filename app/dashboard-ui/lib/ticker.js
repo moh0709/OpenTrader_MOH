@@ -1,15 +1,25 @@
 /**
- * The bottom ticker: one open trade at a time, sliding in like a news channel's
- * lower third.
+ * The bottom ticker: two lanes, one item at a time each, sliding in like a news
+ * channel's lower third.
+ *
+ * Left is the market — the open trades, worst first, so a loss is never buried
+ * at the end. Right is the AI, and only the half of it that moved money: what
+ * it opened, closed, capped or was blocked from doing.
+ *
+ * They are separate lanes rather than one merged stream because they answer
+ * different questions and are read at different moments. Interleaved, a burst
+ * of AI activity would push every position off the bar exactly when the
+ * positions were the thing worth watching.
  *
  * A continuous marquee was the obvious reading of "gliding text", but it is the
  * wrong one for this data. Marquee speed is fixed by pixel width, so a long bot
  * name would linger and a short one would flick past, and a reader who glances
- * down mid-scroll catches half a number. One trade at a time, held for a beat,
- * means every trade gets the same three seconds and is always readable whole.
+ * down mid-scroll catches half a number. One item at a time, held for a beat,
+ * means every one gets the same seconds and is always readable whole.
  *
- * Both the owner dashboard and a shared live feed mount this from the same
- * position rows, so a viewer sees exactly what the owner sees.
+ * Both the owner dashboard and a shared live feed mount the trade lane from the
+ * same position rows, so a viewer sees exactly what the owner sees. The AI lane
+ * is the owner's alone: a share recipient cannot reach the action stream.
  */
 import { money, percent } from "./format.js";
 
@@ -117,7 +127,115 @@ export function markRising(items, previous) {
 }
 
 /**
- * Mount the bar and cycle it.
+ * Trade-affecting AI actions, as lines for the AI News lane.
+ *
+ * Only what the AI *did* to positions and capital. Its readings and its
+ * deliberations are on the AI tab where there is room for them; a lower third
+ * that scrolled "council says hold" past you every five seconds would train you
+ * to stop looking at the half that matters.
+ *
+ * Input order is preserved, and the feed hands them over newest first — the
+ * opposite of the trade lane, which leads with the worst position. Different
+ * question: that lane asks "what needs attention", this one asks "what just
+ * happened".
+ */
+const NEWS_CHIPS = ["open", "close", "take-profit", "risk", "cap", "adjust"];
+
+export function toNewsItems(actions) {
+  return (actions ?? [])
+    .filter((action) => NEWS_CHIPS.includes(action.chip))
+    .map((action) => ({
+      key: action.id,
+      chip: action.chip,
+      who: [action.botName, action.symbol].filter(Boolean).join(" · "),
+      title: action.title,
+      detail: action.detail,
+      at: action.at,
+      autonomous: Boolean(action.autonomous),
+      // Green for a gain, red for anything that cost or blocked, neutral
+      // otherwise — same vocabulary as the trade lane beside it.
+      direction: action.severity === "success" ? "up" : action.severity === "info" ? "flat" : "down",
+    }));
+}
+
+/** The trade lane's line: bot, symbol, status, opened, now, and the gap. */
+function renderTradeLine(item) {
+  const line = document.createElement("span");
+  line.className = `ticker__line ticker__line--${item.direction}`;
+
+  const parts = [
+    ["ticker__bot", `BOT: ${item.botName}`],
+    ["ticker__sym", item.symbol],
+    ["ticker__status", item.status],
+    ["ticker__opened", `opened ${item.opened}`],
+    ["ticker__value", `now ${item.value}`],
+    ["ticker__pnl", `${item.arrow} ${item.floating} (${item.change})`],
+  ];
+
+  parts.forEach(([cls, text], i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "ticker__sep";
+      sep.textContent = "|";
+      line.append(sep);
+    }
+
+    const span = document.createElement("span");
+    span.className = cls;
+    // Only the "now" figure pulses, and only when it has actually risen since
+    // the previous poll. Pulsing everything green would be decoration; this is
+    // meant to catch the eye on the one number that moved up.
+    if (cls === "ticker__value" && item.rising) span.classList.add("ticker__value--rising");
+    span.textContent = text;
+    line.append(span);
+  });
+
+  return line;
+}
+
+/** The AI lane's line: what it did, to what, and why, in that order. */
+function renderNewsLine(item) {
+  const line = document.createElement("span");
+  line.className = `ticker__line ticker__line--${item.direction}`;
+
+  const chip = document.createElement("span");
+  chip.className = "ticker__chip";
+  chip.dataset.chip = item.chip;
+  chip.textContent = item.chip.replace(/-/g, " ");
+  line.append(chip);
+
+  if (item.autonomous) {
+    const auto = document.createElement("span");
+    auto.className = "ticker__chip ticker__chip--auto";
+    auto.textContent = "auto";
+    line.append(auto);
+  }
+
+  const parts = [
+    ["ticker__bot", item.who || item.title],
+    ["ticker__status", item.who ? item.title : ""],
+    ["ticker__opened", item.detail ?? ""],
+  ].filter(([, text]) => text);
+
+  parts.forEach(([cls, text], i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "ticker__sep";
+      sep.textContent = "|";
+      line.append(sep);
+    }
+
+    const span = document.createElement("span");
+    span.className = cls;
+    span.textContent = text;
+    line.append(span);
+  });
+
+  return line;
+}
+
+/**
+ * Mount one lane and cycle it.
  *
  * `getItems` is called on each turn rather than the items being passed in, so
  * the bar always reads from whatever the page last polled instead of keeping a
@@ -126,12 +244,20 @@ export function markRising(items, previous) {
  * The cycle is driven by setTimeout rather than a CSS animation loop because it
  * must survive the list changing underneath it: positions close and open while
  * the bar is running, and an index into a stale array would skip or repeat.
+ *
+ * Both lanes share this. They differ only in how a line is drawn and what they
+ * say when there is nothing to show, which is what `render` and `emptyText`
+ * are for.
  */
-export function mountTicker(bar, getItems, { itemMs = ITEM_MS, takeoverMs = TAKEOVER_MS } = {}) {
-  const track = bar.querySelector("[data-ticker-item]");
-  const label = bar.querySelector("[data-ticker-count]");
-  const prevButton = bar.querySelector("[data-ticker-prev]");
-  const nextButton = bar.querySelector("[data-ticker-next]");
+export function mountLane(
+  bar,
+  getItems,
+  { itemMs = ITEM_MS, takeoverMs = TAKEOVER_MS, render: renderLine = renderTradeLine, emptyText = "No open trades" } = {},
+) {
+  const track = bar.querySelector("[data-lane-item]");
+  const label = bar.querySelector("[data-lane-count]");
+  const prevButton = bar.querySelector("[data-lane-prev]");
+  const nextButton = bar.querySelector("[data-lane-next]");
 
   let index = 0;
   let timer = null;
@@ -146,37 +272,7 @@ export function mountTicker(bar, getItems, { itemMs = ITEM_MS, takeoverMs = TAKE
     track.replaceChildren();
     track.classList.remove("ticker__item--in");
 
-    const line = document.createElement("span");
-    line.className = `ticker__line ticker__line--${item.direction}`;
-
-    const parts = [
-      ["ticker__bot", `BOT: ${item.botName}`],
-      ["ticker__sym", item.symbol],
-      ["ticker__status", item.status],
-      ["ticker__opened", `opened ${item.opened}`],
-      ["ticker__value", `now ${item.value}`],
-      ["ticker__pnl", `${item.arrow} ${item.floating} (${item.change})`],
-    ];
-
-    parts.forEach(([cls, text], i) => {
-      if (i > 0) {
-        const sep = document.createElement("span");
-        sep.className = "ticker__sep";
-        sep.textContent = "|";
-        line.append(sep);
-      }
-
-      const span = document.createElement("span");
-      span.className = cls;
-      // Only the "now" figure pulses, and only when it has actually risen since
-      // the previous poll. Pulsing everything green would be decoration; this is
-      // meant to catch the eye on the one number that moved up.
-      if (cls === "ticker__value" && item.rising) span.classList.add("ticker__value--rising");
-      span.textContent = text;
-      line.append(span);
-    });
-
-    track.append(line);
+    track.append(renderLine(item));
     void track.offsetWidth;
     track.classList.add("ticker__item--in");
   };
@@ -185,7 +281,7 @@ export function mountTicker(bar, getItems, { itemMs = ITEM_MS, takeoverMs = TAKE
     track.replaceChildren();
     const line = document.createElement("span");
     line.className = "ticker__line ticker__line--flat";
-    line.textContent = "No open trades";
+    line.textContent = typeof emptyText === "function" ? emptyText() : emptyText;
     track.append(line);
     track.classList.add("ticker__item--in");
     if (label) label.textContent = "";
@@ -275,4 +371,35 @@ export function mountTicker(bar, getItems, { itemMs = ITEM_MS, takeoverMs = TAKE
     document.removeEventListener("visibilitychange", onVisibility);
     bar.hidden = true;
   };
+}
+
+/**
+ * The trade lane, and the bar that holds it.
+ *
+ * Kept as its own function because a shared live feed mounts exactly this and
+ * nothing else: a recipient has no access to the AI action stream, so the right
+ * lane is not theirs to see.
+ */
+export function mountTicker(container, getItems, options = {}) {
+  const lane = container.querySelector("[data-lane-trades]") ?? container;
+  const stop = mountLane(lane, getItems, options);
+
+  container.hidden = false;
+
+  return () => {
+    stop();
+    container.hidden = true;
+  };
+}
+
+/** The AI News lane. Only mounted where the AI action stream is readable. */
+export function mountNewsLane(container, getItems, options = {}) {
+  const lane = container.querySelector("[data-lane-ai]");
+  if (!lane) return () => {};
+
+  return mountLane(lane, getItems, {
+    render: renderNewsLine,
+    emptyText: "No AI activity yet",
+    ...options,
+  });
 }

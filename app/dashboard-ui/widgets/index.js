@@ -7,11 +7,13 @@ import { opsWidgets } from "./ops.js";
 import { arbitrageWidgets } from "./arbitrage.js";
 import { researchWidgets } from "./research.js";
 import { learningJournalWidget } from "./learning.js";
+import { aiWidgets } from "./ai.js";
 
 const WIDGETS = [
   ...overviewWidgets,
   ...tradeWidgets,
   ...marketWidgets,
+  ...aiWidgets,
   ...arbitrageWidgets,
   ...researchWidgets,
   learningJournalWidget,

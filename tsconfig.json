@@ -6,6 +6,12 @@
       "path": "app"
     },
     {
+      "path": "packages/ai-team"
+    },
+    {
+      "path": "packages/arbitrage"
+    },
+    {
       "path": "packages/backtesting"
     },
     {
@@ -33,7 +39,13 @@
       "path": "packages/logger"
     },
     {
+      "path": "packages/mcp-server"
+    },
+    {
       "path": "packages/prisma"
+    },
+    {
+      "path": "packages/regime"
     },
     {
       "path": "packages/tools"

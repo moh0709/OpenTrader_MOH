@@ -12,13 +12,22 @@ import { initToasts, toast, toastForEvent } from "./lib/toast.js";
 import { initPoller, resetCursor, schedule, tick } from "./lib/poller.js";
 import {
   PRESETS,
+  activeTabId,
   addWidget,
   applyHeightMode,
   applyPreset,
+  boardTabs,
+  createTab,
+  dropTab,
   focusGroup,
+  focusTab,
   initLayout,
   instanceCount,
+  onBoardChange,
   resetLayout,
+  retitleTab,
+  selectTab,
+  tabIdHolding,
 } from "./lib/layout.js";
 import { groupedCatalog } from "./widgets/index.js";
 import { el, mount } from "./lib/dom.js";
@@ -26,8 +35,14 @@ import { money, timeAgo } from "./lib/format.js";
 import { fetchWatchers, renderShareManager, shareToken, startLiveFeed } from "./lib/share.js";
 import { openCommandPalette } from "./lib/command-palette.js";
 import { renderAiSettings } from "./lib/ai-settings.js";
-import { markRising, mountTicker, toTickerItems } from "./lib/ticker.js";
-import { query } from "./lib/api.js";
+import { markRising, mountNewsLane, mountTicker, toNewsItems, toTickerItems } from "./lib/ticker.js";
+import {
+  actions as aiActions,
+  isConfigured as isAiConfigured,
+  startAiFeed,
+  subscribe as onAiAction,
+} from "./lib/ai-feed.js";
+import { initSpotlight } from "./lib/spotlight.js";
 
 const app = document.getElementById("app");
 const login = document.getElementById("login");
@@ -157,6 +172,128 @@ function bindChrome() {
     const { type, config } = event.detail ?? {};
     if (type) addWidget(type, config);
   });
+
+  // A widget that has something new to show announces it here, and the tab it
+  // sits on grows a dot until you look. Same reasoning as the event above: a
+  // widget must not import the layout it is being rendered by.
+  document.addEventListener("opentrader:tab-activity", (event) => {
+    const tabId = event.detail?.tabId;
+    if (!tabId || tabId === activeTabId()) return;
+
+    unseen.add(tabId);
+    renderTabs();
+  });
+
+  // The autopilot banner belongs to the page, not to the chat widget that arms
+  // it: the widget lives on one tab and is destroyed the moment you leave it,
+  // and "the AI can act unattended" must stay visible wherever you are.
+  const banner = document.querySelector("[data-autopilot]");
+
+  document.addEventListener("opentrader:autopilot", (event) => {
+    banner.hidden = !event.detail?.armed;
+  });
+
+  document.querySelector("[data-autopilot-off]")?.addEventListener("click", () => {
+    document.dispatchEvent(new CustomEvent("opentrader:autopilot-disarm"));
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !banner.hidden) {
+      document.dispatchEvent(new CustomEvent("opentrader:autopilot-disarm"));
+    }
+  });
+}
+
+// ---------- Tabs ----------
+
+/** Tabs with something new on them since you were last there. */
+const unseen = new Set();
+
+function goToTab(id) {
+  unseen.delete(id);
+  selectTab(id);
+  if (window.location.hash !== `#${id}`) window.history.replaceState(null, "", `#${id}`);
+}
+
+/**
+ * Rename or remove one tab.
+ *
+ * Both live behind the same right-click because they are the same thought —
+ * "this tab is not what I want" — and because a row of tabs each carrying a
+ * close button is a row of tabs you delete by accident.
+ */
+function editTab(tab) {
+  const name = window.prompt(`Rename “${tab.name}”. Clear the box to remove the tab instead.`, tab.name);
+  if (name === null) return;
+
+  if (name.trim() === "") {
+    if (window.confirm(`Remove the “${tab.name}” tab and the ${tab.count} widget(s) on it?`)) dropTab(tab.id);
+    return;
+  }
+
+  retitleTab(tab.id, name);
+}
+
+function renderTabs() {
+  const bar = document.querySelector("[data-tabs]");
+  if (!bar) return;
+
+  const active = activeTabId();
+
+  mount(
+    bar,
+    ...boardTabs().map((tab) =>
+      el(
+        "button",
+        {
+          class: "tab",
+          type: "button",
+          role: "tab",
+          "aria-selected": String(tab.id === active),
+          // Only the selected tab is in the tab order; the arrow keys move
+          // between them from there, which is how a tablist is meant to behave.
+          tabindex: tab.id === active ? "0" : "-1",
+          title: `${tab.name} — right-click to rename or remove`,
+          dataset: { tab: tab.id, active: String(tab.id === active) },
+          onclick: () => goToTab(tab.id),
+          oncontextmenu: (event) => {
+            event.preventDefault();
+            editTab(tab);
+          },
+        },
+        [
+          el("span", { class: "tab__name", text: tab.name }),
+          unseen.has(tab.id) ? el("span", { class: "tab__dot", title: "Something new here", "aria-label": "New activity" }) : null,
+        ],
+      ),
+    ),
+    el("button", {
+      class: "tab tab--add",
+      type: "button",
+      title: "Add a tab",
+      "aria-label": "Add a tab",
+      text: "+",
+      onclick: () => {
+        const name = window.prompt("Name the new tab", "New tab");
+        if (name !== null) createTab(name);
+      },
+    }),
+  );
+}
+
+function bindTabKeys() {
+  document.querySelector("[data-tabs]")?.addEventListener("keydown", (event) => {
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (step === 0) return;
+
+    const tabs = boardTabs();
+    const index = tabs.findIndex((tab) => tab.id === activeTabId());
+    if (index < 0) return;
+
+    event.preventDefault();
+    goToTab(tabs[(index + step + tabs.length) % tabs.length].id);
+    document.querySelector('[data-tabs] [data-active="true"]')?.focus();
+  });
 }
 
 /**
@@ -167,22 +304,40 @@ function openPalette() {
   const refreshLabel = store.settings.refreshMs === 0 ? "Resume auto-refresh" : "Pause auto-refresh";
 
   const actions = [
+    // Tabs first: with a board per tab, "where am I going" is now the most
+    // common thing anyone opens the palette to answer.
+    ...boardTabs().map((tab) => ({
+      label: `Go to ${tab.name}`,
+      hint: tab.id === activeTabId() ? "here" : `${tab.count} widget${tab.count === 1 ? "" : "s"}`,
+      section: "Tabs",
+      keywords: ["tab", "view", "switch"],
+      run: () => goToTab(tab.id),
+    })),
+    {
+      label: "New tab",
+      section: "Tabs",
+      keywords: ["add", "create"],
+      run: () => {
+        const name = window.prompt("Name the new tab", "New tab");
+        if (name !== null) createTab(name);
+      },
+    },
     ...groupedCatalog().entries().flatMap(([group, widgets]) =>
       widgets.map((widget) => ({
         label: `Add ${widget.name ?? widget.id}`,
-        hint: instanceCount(widget.id) > 0 ? "on board" : undefined,
+        hint: instanceCount(widget.id) > 0 ? "on this tab" : undefined,
         section: "Add widget",
         keywords: [group],
         run: () => addWidget(widget.id),
       })),
     ),
     ...Object.keys(PRESETS).map((name) => ({
-      label: `Switch to ${name[0].toUpperCase()}${name.slice(1)} view`,
+      label: `Fill this tab with the ${name[0].toUpperCase()}${name.slice(1)} set`,
       section: "View",
       keywords: ["preset", "layout", "board"],
       run: () => applyPreset(name),
     })),
-    { label: "Reset board to default layout", section: "View", keywords: ["layout"], run: resetLayout },
+    { label: "Reset every tab to its default widgets", section: "View", keywords: ["layout"], run: resetLayout },
     { label: "Add a widget (browse all)", section: "View", run: () => openDrawer("catalog") },
     { label: "Toggle light / dark theme", section: "View", keywords: ["appearance"], run: toggleTheme },
     { label: "Go to cross-venue arbitrage", section: "View", keywords: ["scan"], run: () => focusGroup("arbitrage") },
@@ -405,6 +560,11 @@ function renderSettings() {
       "Drag the corner of any widget to change its width, and its height in fixed mode.",
       applyHeightMode,
     ),
+    checkbox(
+      "Highlight AI actions on the board",
+      "highlightAiActions",
+      "When the AI opens or closes a trade, changes a cap or is blocked by a risk limit, the row it touched is ringed and a short note appears beside it for a few seconds.",
+    ),
     el("div", { class: "field" }, [
       el("label", { class: "field__label", text: "Load a preset" }),
       el(
@@ -416,12 +576,12 @@ function renderSettings() {
             type: "button",
             text: name[0].toUpperCase() + name.slice(1),
             onclick: () => {
-              if (window.confirm(`Replace the current board with the ${name} preset?`)) applyPreset(name);
+              if (window.confirm(`Replace the widgets on this tab with the ${name} preset?`)) applyPreset(name);
             },
           }),
         ),
       ),
-      el("div", { class: "field__hint", text: "Replaces every widget on the board." }),
+      el("div", { class: "field__hint", text: "Replaces every widget on the tab you are looking at. Other tabs are untouched." }),
     ]),
 
     el("div", { class: "section-title", text: "Data" }),
@@ -450,7 +610,7 @@ function renderSettings() {
         type: "button",
         text: "Reset layout",
         onclick: () => {
-          if (window.confirm("Reset the board to the default widgets?")) {
+          if (window.confirm("Put every tab back to its default widgets? Tabs you added yourself are removed.")) {
             resetLayout();
             closeDrawer("settings");
           }
@@ -472,11 +632,17 @@ function renderSettings() {
 // ---------- Deep links ----------
 
 /**
- * A fragment naming a widget group opens the board on that group.
+ * A fragment names a tab, or failing that a widget group.
  *
  * This is how the "Arbitrage" button in the main OpenTrader navigation arrives:
  * it is a link to /analytics/#arbitrage, and the dashboard is a separate
  * document, so the fragment is the only state it can carry across.
+ *
+ * Tabs are tried first. Since tabs exist, "#arbitrage" means "the Arbitrage
+ * tab", which is where those widgets already live — resolving it as a group
+ * first would instead place a second copy of them on whatever tab happened to
+ * be open. The group lookup stays as the fallback for a group with no tab of
+ * its own.
  *
  * An unrecognised fragment is left alone rather than treated as an error. The
  * main app is a hash-routed React bundle and its login guard writes
@@ -486,7 +652,15 @@ function renderSettings() {
 function bindHashFocus() {
   const apply = () => {
     const slug = window.location.hash.replace(/^#/, "").trim().toLowerCase();
-    if (slug) focusGroup(slug);
+    if (!slug) return;
+
+    if (focusTab(slug)) {
+      unseen.delete(slug);
+      renderTabs();
+      return;
+    }
+
+    focusGroup(slug);
   };
 
   window.addEventListener("hashchange", apply);
@@ -500,7 +674,12 @@ function start() {
   applyTheme();
   bindChrome();
   initToasts(document.querySelector("[data-toasts]"), document.querySelector("[data-toasts-alerts]"));
+
+  // The bar redraws whenever the board changes — a tab added, renamed, removed
+  // or switched — rather than every caller having to remember to redraw it.
+  onBoardChange(renderTabs);
   initLayout(document.querySelector("[data-grid]"));
+  bindTabKeys();
   bindHashFocus();
 
   store.subscribe((reason) => {
@@ -537,31 +716,49 @@ function start() {
   void pollWatchers();
   window.setInterval(() => void pollWatchers(), 15_000);
 
-  // The bottom ticker polls on its own rather than riding the widget refresh:
-  // it has to keep running whether or not the user has added a positions
-  // widget, and it is the one thing on the page that is always visible.
+  // What the AI is doing. One poller, read by the action window, the board
+  // highlights and the AI News lane.
+  startAiFeed();
+  initSpotlight({ subscribe: onAiAction, isEnabled: () => store.settings.highlightAiActions });
+
+  // The AI tab is normally not the one you are on, and only the active tab is
+  // built — so the widget cannot tell you something arrived. The dot is put on
+  // the tab from out here, where the feed is visible whatever is on screen.
+  onAiAction(() => {
+    const home = tabIdHolding(["aiActions", "aiChat"]);
+    if (!home || home === activeTabId()) return;
+
+    unseen.add(home);
+    renderTabs();
+  });
+
+  // The bottom ticker reads the refresh tick's positions rather than polling
+  // for its own copy. It used to run a second five-second timer against the
+  // same procedure, which doubled the request rate for data the page was
+  // already fetching — and let the bar and the widgets disagree about the same
+  // trades whenever the two timers drifted apart.
   let tickerItems = [];
   // Last "now" value per trade, so a rise between polls can be highlighted.
   const tickerValues = new Map();
 
-  const pollTicker = async () => {
-    if (document.visibilityState !== "visible") return;
+  store.subscribe((reason) => {
+    if (reason !== "positions") return;
 
-    try {
-      // No `state`: the filter is an enum of live/abandoned/missing, and
-      // leaving it off is what means "all three", which is what the bar shows.
-      const view = await query("dashboard.positions", { includePending: false });
+    const view = store.data.positions;
+    if (view) tickerItems = markRising(toTickerItems(view.positions, view.botNames), tickerValues);
+  });
 
-      tickerItems = markRising(toTickerItems(view.positions, view.botNames), tickerValues);
-    } catch {
-      // Keep showing the last good set. A blank bar on one failed poll would
-      // read as "no open trades", which is a different and alarming claim.
-    }
-  };
+  const bar = document.querySelector("[data-ticker]");
+  mountTicker(bar, () => tickerItems);
 
-  void pollTicker();
-  window.setInterval(() => void pollTicker(), 5000);
-  mountTicker(document.querySelector("[data-ticker]"), () => tickerItems);
+  // The right lane: the same bar for the AI, carrying only what it did to
+  // positions and capital. It reads the shared feed rather than polling, so it
+  // costs nothing beyond what the action window already fetches. Mounting it is
+  // what reveals it, which is why a shared feed — which never gets here — keeps
+  // the single-lane bar it always had.
+  mountNewsLane(bar, () => toNewsItems(aiActions()), {
+    emptyText: () => (isAiConfigured() === false ? "AI council off" : "No AI activity yet"),
+  });
 
   initPoller({
     onEvents: (events) => {

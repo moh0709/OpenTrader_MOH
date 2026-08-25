@@ -4,12 +4,14 @@ import {
   createLlmAnalyst,
   describeDecision,
   llmConfigFromEnv,
+  recordAiAction,
   type AgentOpinion,
   type Candle,
   type CouncilVerdict,
   type MarketSnapshot,
   type PortfolioState,
   type RiskLimits,
+  type Signal,
 } from "@opentrader/ai-team";
 import { buy, cancelSmartTrade, sell, type IBotConfiguration, type TBotContext } from "@opentrader/bot-processor";
 import { logger } from "@opentrader/logger";
@@ -132,6 +134,56 @@ export function* hybrid(ctx: HybridContext) {
   const decision = applyRiskGovernor(verdict, limits, portfolio);
   logger.info(`[Hybrid] ${describeDecision(decision, symbol)}`);
 
+  const botId = ctx.config.id;
+  const percent = (value: number) => `${Math.round(value * 100)}%`;
+
+  /*
+   * Report to the dashboard's AI feed.
+   *
+   * Only *changes* are recorded here, never every tick. The council re-states
+   * its view on every candle close, so a bot that has been holding all morning
+   * would otherwise write hundreds of identical "council says hold" entries and
+   * bury the one tick where it actually did something. A change of mind is
+   * news; repeating yourself is not.
+   *
+   * Orders and force-exits below are recorded unconditionally — those are rare,
+   * they move real money, and every one of them is worth seeing.
+   */
+  const voted = verdict.opinions.filter((opinion) => opinion.available !== false);
+  const agreeing = voted.filter((opinion) => opinion.signal === verdict.signal).length;
+
+  if (verdict.signal !== state.lastCouncilSignal) {
+    state.lastCouncilSignal = verdict.signal;
+
+    recordAiAction({
+      chip: "analysis",
+      title: `Council: ${verdict.signal.toUpperCase()} ${symbol}`,
+      detail: `${agreeing} of ${voted.length} agents agree at ${percent(verdict.confidence)} confidence. ${verdict.rationale}`,
+      botId,
+      symbol,
+    });
+  }
+
+  // Being held back is worth seeing, but the governor repeats its objection for
+  // as long as the condition lasts, so it is recorded once per distinct reason.
+  const riskNote = decision.riskNotes.join("; ");
+
+  if (!decision.approved && verdict.signal !== "hold" && riskNote !== state.lastRiskNote) {
+    state.lastRiskNote = riskNote;
+
+    recordAiAction({
+      chip: "risk",
+      title: `Trade blocked on ${symbol}`,
+      detail: `Council wanted to ${verdict.signal}. ${riskNote}`,
+      botId,
+      symbol,
+    });
+  }
+
+  // A trade got through, so whatever was blocking is over: forget it, or the
+  // next block for the same reason would be swallowed as a repeat.
+  if (decision.approved) state.lastRiskNote = undefined;
+
   // A tripped loss limit means get flat, not just stop buying. `sell` targets
   // this bot's own smart trade and is a no-op if an exit is already working, so
   // repeating it on later ticks cannot stack up duplicate orders.
@@ -141,6 +193,15 @@ export function* hybrid(ctx: HybridContext) {
     logger.warn(
       `[Hybrid] Force-exiting ${quantity.toFixed(8)} ${symbol} (~${state.openExposureQuote.toFixed(2)} quote): ${decision.liquidateReason}`,
     );
+
+    recordAiAction({
+      chip: "risk",
+      severity: "danger",
+      title: `Force-exit ${symbol}`,
+      detail: decision.liquidateReason ?? "A loss limit tripped while a position was open.",
+      botId,
+      symbol,
+    });
 
     state.openExposureQuote = 0;
     yield sell({ quantity, orderType: "Market" });
@@ -158,10 +219,28 @@ export function* hybrid(ctx: HybridContext) {
   if (decision.signal === "buy") {
     logger.info(`[Hybrid] BUY ${quantity.toFixed(8)} ${symbol} (~${decision.sizeQuote.toFixed(2)} quote)`);
     state.openExposureQuote += decision.sizeQuote;
+
+    recordAiAction({
+      chip: "open",
+      title: `Opened ${symbol}`,
+      detail: `Bought about ${decision.sizeQuote.toFixed(2)} quote at market on ${percent(decision.confidence)} council confidence.`,
+      botId,
+      symbol,
+    });
+
     yield buy({ quantity, orderType: "Market" });
   } else {
     logger.info(`[Hybrid] SELL ${quantity.toFixed(8)} ${symbol} (~${decision.sizeQuote.toFixed(2)} quote)`);
     state.openExposureQuote = Math.max(0, state.openExposureQuote - decision.sizeQuote);
+
+    recordAiAction({
+      chip: "close",
+      title: `Closed ${symbol}`,
+      detail: `Sold about ${decision.sizeQuote.toFixed(2)} quote at market on ${percent(decision.confidence)} council confidence.`,
+      botId,
+      symbol,
+    });
+
     yield sell({ quantity, orderType: "Market" });
   }
 }
@@ -210,11 +289,27 @@ hybrid.watchers = {
   watchOrderbook: ({ symbol }: IBotConfiguration) => symbol,
 };
 
+/**
+ * Bot state, all of it optional.
+ *
+ * A bot starts with an empty state object and the generator fills it in with
+ * `??=` on its first tick, so nothing here is present until then. Declaring the
+ * numbers as required said otherwise, and that made `typeof hybrid` incompatible
+ * with `BotTemplate<any>` — which is why the strategy registry and the
+ * get-strategies handler both failed to typecheck.
+ */
 type HybridState = {
   day?: string;
-  openExposureQuote: number;
-  realizedPnlToday: number;
-  consecutiveLosses: number;
+  openExposureQuote?: number;
+  realizedPnlToday?: number;
+  consecutiveLosses?: number;
+  /**
+   * What the council last said, and what last stopped it. Held only so the AI
+   * action feed can report changes rather than restating the same view on every
+   * candle; neither takes any part in a trading decision.
+   */
+  lastCouncilSignal?: Signal;
+  lastRiskNote?: string;
 };
 
 type HybridSettings = z.infer<typeof hybrid.schema>;

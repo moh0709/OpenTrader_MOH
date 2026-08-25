@@ -180,6 +180,11 @@ export function startLiveFeed(token) {
     "[data-share-presence]",
     // There is no widget board behind it here, only the feed card.
     "[data-open-arbitrage]",
+    // ...and so no tabs. An empty tab bar is a bordered strip of nothing.
+    "[data-tabs]",
+    // The AI surface is the owner's. A recipient holds a share token, which the
+    // dashboard API does not accept, so every one of these would only 401.
+    "[data-open-ai-settings]",
   ]) {
     document.querySelector(selector)?.remove();
   }

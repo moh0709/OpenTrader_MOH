@@ -1,13 +1,63 @@
-name: Build Docker Image
+name: CI
 
 on:
   push:
     branches:
       - dev
+  pull_request:
 
 jobs:
+  # Nothing is published until this passes. The workflow used to build and push
+  # an image straight from a push, with no test, lint or typecheck between the
+  # commit and Docker Hub — for a service that places real orders on a live
+  # exchange.
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.1
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12
+          cache: pnpm
+
+      # --frozen-lockfile is the default in CI and is the point of committing
+      # the lockfile at all: a build that cannot be reproduced is not a build
+      # you can roll back to. Adding a dependency now means committing the
+      # updated lockfile with it.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The client is generated from the schema, not committed. Without this the
+      # typecheck cannot see any model and fails on every query.
+      - name: Generate the Prisma client
+        run: pnpm --filter @opentrader/prisma exec prisma generate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # The two live integration suites stay skipped: they need a seeded
+      # database and place real orders. Set OPENTRADER_INTEGRATION=1 to run them
+      # somewhere that is safe to trade from.
+      - name: Test
+        run: pnpm exec vitest run
+
   build:
     runs-on: ubuntu-latest
+    needs: verify
+    # Only publish from the branch. A pull request is verified, never released.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
 
     steps:
       - name: Checkout code
@@ -19,13 +69,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # ADMIN_PASSWORD used to be passed here as a build arg. Neither Dockerfile
+      # ever declared it, so Docker discarded it with a warning — it was not
+      # baked into the image, but it read as though the published image shipped
+      # with a known password. The password is supplied at run time, as an
+      # environment variable, and only there.
       - name: Build Docker Image
         run: >-
           docker build
-          --build-arg ADMIN_PASSWORD=password
           --build-arg GITHUB_TOKEN=${{ secrets.PRO_GITHUB_TOKEN }}
           -f pro.Dockerfile
-          -t opentrader/opentrader:latest .
+          -t opentrader/opentrader:latest
+          -t opentrader/opentrader:${{ github.sha }} .
 
+      # Tagged by commit as well as latest, so a bad release can be rolled back
+      # to a specific build rather than to whatever "latest" used to mean.
       - name: Push Docker Image
-        run: docker push opentrader/opentrader:latest
+        run: |
+          docker push opentrader/opentrader:latest
+          docker push opentrader/opentrader:${{ github.sha }}

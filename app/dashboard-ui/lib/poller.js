@@ -68,14 +68,27 @@ export async function tick({ force = false } = {}) {
   const calls = [
     { path: "dashboard.snapshot", input: { metric: store.settings.leaderboardMetric } },
     { path: "dashboard.events", input: { since: eventCursor, limit: 30 } },
+    // The bottom ticker used to poll this on a timer of its own, at the same
+    // five seconds, which cost a second round trip to the same daemon that also
+    // runs the trading loop. tRPC batches several procedures into one request,
+    // so riding along here is free.
+    //
+    // No `state`: the filter is an enum of live/abandoned/missing, and leaving
+    // it off is what means "all three", which is what the bar shows.
+    { path: "dashboard.positions", input: { includePending: false } },
   ];
   if (wantHealth) calls.push({ path: "dashboard.health", input: {} });
 
   try {
-    const [snapshot, events, health] = await batch(calls);
+    const [snapshot, events, positions, health] = await batch(calls);
 
     if (snapshot instanceof Error) store.setError(snapshot.message);
     else if (snapshot) store.setSnapshot(snapshot);
+
+    // Keep the last good set on a failed poll: a blank bar would read as "no
+    // open trades", which is a different and more alarming claim than "we could
+    // not check just now".
+    if (positions && !(positions instanceof Error)) store.setPositions(positions);
 
     if (events && !(events instanceof Error)) {
       // A cursor of 0 only initialises: the server returns no events, so a first

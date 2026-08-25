@@ -1,9 +1,16 @@
 /**
- * The widget board: placement, drag-to-reorder, resize and persistence.
+ * The widget board: tabs, placement, drag-to-reorder, resize and persistence.
  *
  * Widgets sit on a 12 column grid. Each instance stores its own span, its own
  * row height and its own config, and the whole board is persisted to
  * localStorage so a reload restores the view you built.
+ *
+ * The board is divided into tabs, and **only the active tab is built**. That is
+ * not just tidiness: every chart sizes itself to its container and redraws on
+ * each refresh, so a single grid holding thirty widgets paid for all thirty
+ * every five seconds to show you the six you were looking at. Switching tabs
+ * disposes the old controllers and builds the new ones, which is why a tab you
+ * are not on costs nothing at all.
  *
  * Height has two modes. "Auto" lets a widget grow to its content, which suits
  * tables and check lists; "Fixed" pins it to a row count, which keeps a wall of
@@ -12,19 +19,44 @@
  */
 import { el } from "./dom.js";
 import { groupSlug } from "./groups.js";
-import { layoutStorage, store } from "./store.js";
+import {
+  PRESETS,
+  activeTab,
+  addTab,
+  loadBoard,
+  removeTab,
+  renameTab,
+  saveBoard,
+  seed,
+  tabHolding,
+  withActive,
+  withWidgets,
+} from "./board.js";
+import { boardStorage, store } from "./store.js";
 import { getWidget, widgetCatalog } from "../widgets/index.js";
 
+export { PRESETS };
+
 let gridNode = null;
-let instances = [];
+let board = { activeTab: null, tabs: [] };
 let sequence = 1;
 
 const controllers = new Map();
+/** Notified whenever the set of tabs, or which one is active, changes. */
+const boardListeners = new Set();
+
+/** The dependencies board.js needs but deliberately does not import. */
+const deps = {
+  makeInstance: (type, config) => makeInstance(type, config),
+  knownType: (type) => Boolean(getWidget(type)),
+};
 
 export function initLayout(node) {
   gridNode = node;
-  instances = loadLayout();
+  board = loadBoard(deps);
+  reseed();
   renderAll();
+  announce();
 
   // Widget headers are built once, and several of them fill a bot dropdown from
   // the snapshot. On a cold load that snapshot has not arrived yet, leaving the
@@ -39,24 +71,18 @@ export function initLayout(node) {
   });
 }
 
-function loadLayout() {
-  const saved = layoutStorage.load();
+/**
+ * Continue the uid sequence past everything already on the board.
+ *
+ * Uids are DOM selectors, and they have to be unique across every tab, not just
+ * the visible one — a widget added on the AI tab must not collide with one that
+ * has been sitting on Analytics since last week.
+ */
+function reseed() {
+  const uids = board.tabs.flatMap((tab) => tab.widgets.map((widget) => Number(String(widget.uid).split("-")[1])));
+  const highest = uids.reduce((max, value) => (Number.isFinite(value) ? Math.max(max, value) : max), 0);
 
-  if (Array.isArray(saved?.widgets) && saved.widgets.length > 0) {
-    const restored = saved.widgets.filter((instance) => getWidget(instance.type));
-    sequence = restored.reduce((max, instance) => Math.max(max, Number(instance.uid.split("-")[1])), 0) + 1;
-
-    // A pinned widget must always be present, even in an older saved layout.
-    for (const widget of widgetCatalog()) {
-      if (widget.pinned && !restored.some((instance) => instance.type === widget.id)) {
-        restored.unshift(makeInstance(widget.id));
-      }
-    }
-
-    return restored;
-  }
-
-  return preset("overview");
+  sequence = highest + 1;
 }
 
 function makeInstance(type, config = {}) {
@@ -71,59 +97,134 @@ function makeInstance(type, config = {}) {
   };
 }
 
-export const PRESETS = {
-  overview: ["kpi", "leaderboard", "fleet", "closedTrades", "health"],
-  desk: ["kpi", "gridLadder", "openPositions", "closedTrades", "abandoned", "events"],
-  analytics: ["kpi", "equity", "winLoss", "pnlDistribution", "holdTime", "heatmap", "fees"],
-  ops: ["kpi", "health", "events", "botLogs", "fleet"],
-  // The AI desk: what the council thinks, what it is doing about it, and the
-  // argument it had on the way there - one keystroke from the palette.
-  mission: ["kpi", "convictionBoard", "regimeImpact", "learningJournal", "researchRoom", "researchLog"],
-};
+// ---------- Tabs ----------
 
-export function preset(name) {
-  sequence = 1;
+export function onBoardChange(listener) {
+  boardListeners.add(listener);
 
-  return (PRESETS[name] ?? PRESETS.overview).map((type) => makeInstance(type));
+  return () => boardListeners.delete(listener);
+}
+
+function announce() {
+  for (const listener of boardListeners) {
+    try {
+      listener(board);
+    } catch (error) {
+      console.error("[analytics] board listener failed", error);
+    }
+  }
+}
+
+export function boardTabs() {
+  return board.tabs.map((tab) => ({ id: tab.id, name: tab.name, count: tab.widgets.length }));
+}
+
+/**
+ * The id of the tab holding any of these widget types, or null.
+ *
+ * Only the active tab is built, so a widget that is not on screen cannot report
+ * anything about itself. This is how the page finds the right tab to mark when
+ * something arrives for a widget nobody is currently looking at.
+ */
+export function tabIdHolding(types) {
+  return tabHolding(board, types)?.id ?? null;
+}
+
+export function activeTabId() {
+  return activeTab(board)?.id ?? null;
+}
+
+/** Switch tabs. A no-op when already there, so a repeated click costs nothing. */
+export function selectTab(id) {
+  if (id === board.activeTab || !board.tabs.some((tab) => tab.id === id)) return false;
+
+  board = withActive(board, id);
+  persist();
+  renderAll();
+  announce();
+
+  return true;
+}
+
+export function createTab(name) {
+  board = addTab(board, name);
+  persist();
+  renderAll();
+  announce();
+
+  return board.activeTab;
+}
+
+export function retitleTab(id, name) {
+  board = renameTab(board, id, name);
+  persist();
+  announce();
+}
+
+export function dropTab(id) {
+  const before = board.tabs.length;
+  board = removeTab(board, id);
+  if (board.tabs.length === before) return false;
+
+  persist();
+  renderAll();
+  announce();
+
+  return true;
+}
+
+// ---------- Widgets on the active tab ----------
+
+function instances() {
+  return activeTab(board)?.widgets ?? [];
+}
+
+function setInstances(widgets) {
+  board = withWidgets(board, board.activeTab, widgets);
+}
+
+function persist() {
+  saveBoard(board);
+}
+
+export function instanceCount(type) {
+  return instances().filter((instance) => instance.type === type).length;
 }
 
 export function applyPreset(name) {
   destroyAll();
-  instances = preset(name);
+  setInstances((PRESETS[name] ?? PRESETS.overview).filter(deps.knownType).map((type) => makeInstance(type)));
   persist();
   renderAll();
+  announce();
 }
 
+/** Put every tab back to its default contents, discarding the saved board. */
 export function resetLayout() {
-  layoutStorage.clear();
+  boardStorage.clear();
   destroyAll();
-  instances = preset("overview");
+  board = seed(deps);
   persist();
   renderAll();
-}
-
-function persist() {
-  layoutStorage.save({ widgets: instances });
-}
-
-export function instanceCount(type) {
-  return instances.filter((instance) => instance.type === type).length;
+  announce();
 }
 
 export function addWidget(type, config) {
   const widget = getWidget(type);
   if (!widget) return;
+
   if (widget.singleton && instanceCount(type) > 0) {
-    // Already on the board: scroll to it rather than adding a duplicate.
-    const existing = instances.find((instance) => instance.type === type);
+    // Already on this tab: scroll to it rather than adding a duplicate.
+    const existing = instances().find((instance) => instance.type === type);
     focusCards([existing.uid]);
     return;
   }
 
   const instance = makeInstance(type, config);
-  instances.push(instance);
+  setInstances([...instances(), instance]);
   persist();
   renderAll();
+  announce();
 
   focusCards([instance.uid]);
 }
@@ -183,20 +284,29 @@ function focusCards(uids) {
 }
 
 /**
- * Put a whole widget group on the board and scroll to it.
+ * Bring a whole widget group into view.
  *
- * This is what the "Arbitrage" button in the main app navigates to. The widgets
- * already existed in the catalogue, but reaching them meant opening the Add
- * widget drawer and knowing to look under a group heading — so the button led to
- * a board that showed no arbitrage at all.
+ * This is what the "Arbitrage" button in the main app navigates to, as a link to
+ * /analytics/#arbitrage. Before tabs it added the group's widgets to whatever
+ * board happened to be open; now it first looks for a tab that already holds
+ * them, because that tab is where they belong and switching to it leaves the
+ * user's own boards untouched.
  *
- * Missing widgets are added and kept, rather than shown as a temporary view: the
- * board is the user's own layout, and a group they asked for by name belongs on
- * it. Repeat visits add nothing further and just scroll back to it.
+ * Only when no tab owns the group does it fall back to the old behaviour of
+ * placing the widgets on the current tab and keeping them — a group asked for by
+ * name should still end up somewhere.
  */
 export function focusGroup(slug) {
   const wanted = widgetCatalog().filter((widget) => groupSlug(widget.group) === slug);
   if (wanted.length === 0) return false;
+
+  const home = tabHolding(board, wanted.map((widget) => widget.id));
+  if (home) {
+    selectTab(home.id);
+    focusCards(home.widgets.filter((w) => wanted.some((x) => x.id === w.type)).map((w) => w.uid));
+
+    return true;
+  }
 
   const added = [];
 
@@ -204,33 +314,52 @@ export function focusGroup(slug) {
     if (instanceCount(widget.id) > 0) continue;
 
     const instance = makeInstance(widget.id);
-    instances.push(instance);
     added.push(instance);
   }
 
   if (added.length > 0) {
+    setInstances([...instances(), ...added]);
     persist();
     renderAll();
+    announce();
   }
 
-  const uids = instances.filter((instance) => wanted.some((w) => w.id === instance.type)).map((i) => i.uid);
+  const uids = instances().filter((instance) => wanted.some((w) => w.id === instance.type)).map((i) => i.uid);
   focusCards(uids);
 
   return true;
 }
 
+/**
+ * Switch to the tab with this id. Used by the hash router.
+ *
+ * Reports whether the tab *exists*, not whether it switched — being asked for
+ * the tab you are already on is a handled request, and returning false would
+ * send the caller on to try the fragment as a widget group instead, which for
+ * "ai" or "arbitrage" would then place a second copy of those widgets on the
+ * tab that already holds them.
+ */
+export function focusTab(slug) {
+  if (!board.tabs.some((tab) => tab.id === slug)) return false;
+
+  selectTab(slug);
+
+  return true;
+}
+
 export function removeWidget(uid) {
-  const instance = instances.find((item) => item.uid === uid);
+  const instance = instances().find((item) => item.uid === uid);
   if (!instance || getWidget(instance.type)?.pinned) return;
 
   destroy(uid);
-  instances = instances.filter((item) => item.uid !== uid);
+  setInstances(instances().filter((item) => item.uid !== uid));
   persist();
   renderAll();
+  announce();
 }
 
 export function updateConfig(uid, patch) {
-  const instance = instances.find((item) => item.uid === uid);
+  const instance = instances().find((item) => item.uid === uid);
   if (!instance) return;
 
   instance.config = { ...instance.config, ...patch };
@@ -256,9 +385,9 @@ function renderAll() {
   destroyAll();
   gridNode.replaceChildren();
 
-  for (const instance of instances) gridNode.append(buildCard(instance));
+  for (const instance of instances()) gridNode.append(buildCard(instance));
 
-  document.querySelector("[data-empty]")?.toggleAttribute("hidden", instances.length > 0);
+  document.querySelector("[data-empty]")?.toggleAttribute("hidden", instances().length > 0);
   restoreFocus();
 }
 
@@ -359,12 +488,14 @@ function attachDrag(card, handle, instance) {
     card.classList.remove("widget--drop-target");
     if (!dragUid || dragUid === instance.uid) return;
 
-    const from = instances.findIndex((item) => item.uid === dragUid);
-    const to = instances.findIndex((item) => item.uid === instance.uid);
+    const current = [...instances()];
+    const from = current.findIndex((item) => item.uid === dragUid);
+    const to = current.findIndex((item) => item.uid === instance.uid);
     if (from < 0 || to < 0) return;
 
-    const [moved] = instances.splice(from, 1);
-    instances.splice(to, 0, moved);
+    const [moved] = current.splice(from, 1);
+    current.splice(to, 0, moved);
+    setInstances(current);
     persist();
     renderAll();
   });
@@ -423,5 +554,5 @@ export function applyHeightMode() {
 }
 
 export function listInstances() {
-  return instances;
+  return instances();
 }

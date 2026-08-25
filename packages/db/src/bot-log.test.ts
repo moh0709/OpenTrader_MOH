@@ -43,9 +43,27 @@ describe("summarizeMarketData", () => {
   });
 
   it("reduces an order book to its best levels", () => {
+    /*
+     * Levels are `{ price, quantity }`, not `[price, quantity]`.
+     *
+     * This fixture used ccxt's raw tuple shape, which never reaches here —
+     * `normalizeOrderbook` converts it to objects at the exchange boundary. The
+     * `as never` cast let the wrong shape through, and the assertion then locked
+     * in the behaviour of production code that read `bids[0][0]` and so logged a
+     * null best bid and ask on every real order book it ever saw.
+     */
     const market = {
       candles: [],
-      orderbook: { bids: [[64_999, 1.2], [64_998, 3]], asks: [[65_001, 0.5], [65_002, 2]] },
+      orderbook: {
+        bids: [
+          { price: 64_999, quantity: 1.2 },
+          { price: 64_998, quantity: 3 },
+        ],
+        asks: [
+          { price: 65_001, quantity: 0.5 },
+          { price: 65_002, quantity: 2 },
+        ],
+      },
     };
 
     expect(summarizeMarketData(market as never)!.orderbook).toEqual({

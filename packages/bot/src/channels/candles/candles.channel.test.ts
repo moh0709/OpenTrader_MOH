@@ -130,7 +130,9 @@ describe("CandlesChannel", () => {
     const oneMinuteChannel = new CandlesChannel(symbol, "1m", exchange);
 
     vi.mocked(exchange.getCandlesticks).mockImplementation(async ({ since }) => {
-      if (since > currentMinute) {
+      // `since` is optional on the request, and a request without one cannot be
+      // in the future — there is no window to be wrong about.
+      if (since !== undefined && since > currentMinute) {
         throw new Error("Exchange request begins in the future");
       }
 
@@ -160,7 +162,8 @@ describe("CandlesChannel", () => {
     const delayedChannel = new CandlesChannel(symbol, timeframe, exchange);
 
     vi.mocked(exchange.getCandlesticks).mockImplementation(async ({ since }) => {
-      if (since < previousWindowStart) {
+      // No `since` means "from the beginning", which is older than any window.
+      if (since === undefined || since < previousWindowStart) {
         return Array.from({ length: bucketSize }, (_, index) =>
           createCandle(olderWindowStart + index * 60000, 100 + index),
         );

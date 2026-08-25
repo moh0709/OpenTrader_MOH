@@ -10,6 +10,7 @@
  * Both surfaces call the same builders in `services/dashboard-views`, so the
  * numbers an agent reads are by construction the numbers on screen.
  */
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eventBus } from "@opentrader/event-bus";
 import { xprisma } from "@opentrader/db";
@@ -26,14 +27,47 @@ import {
   revokeShare,
 } from "../processing/share/share.service.js";
 import { applyRegimeGovernor, requestResearchRun } from "@opentrader/regime";
-import { listModels, setRuntimeProvider, type ProviderConfig, type ProviderId } from "@opentrader/ai-team";
+import {
+  aiActivity,
+  chatCompletionDetailed,
+  listModelCatalog,
+  listModels,
+  recordAiAction,
+  resolveProvider,
+  setRuntimeProvider,
+  type AiActionRecord,
+  type ModelInfo,
+  type ProviderId,
+} from "@opentrader/ai-team";
+import {
+  ALLOWED_ACTIONS,
+  SYSTEM_PROMPT,
+  buildUserTurn,
+  extractProposals,
+  validateProposal,
+  type ChatContext,
+  type ChatMessage,
+  type Proposal,
+} from "./ai-chat.js";
+import { createAiGuards } from "./ai-guard.js";
 import { applyLearning, dismissLearning, evaluateLearning, revertLearning } from "../learning/learning.service.js";
 import { disarmRegime, syncRegime } from "../regime/regime.service.js";
 import { logger } from "@opentrader/logger";
-import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
+import type {
+  Actor,
+  AgentActionRecord,
+  BotLogRow,
+  BucketSize,
+  DashboardEvent,
+  HealthCheck,
+  HealthStatus,
+  LeaderboardMetric,
+} from "@opentrader/trpc";
 import {
   BotService,
+  RateLimiter,
   agentAccess,
+  rollUp,
   buildEventsView,
   buildGridView,
   buildHealthView,
@@ -56,6 +90,32 @@ const num = (value: unknown): number | undefined => {
 };
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+
+/**
+ * Control actions in the words the AI action feed shows.
+ *
+ * The title says what happened; the consequence says what it means. Stopping a
+ * bot in particular is not a neutral act — OpenTrader cancels the resting exit,
+ * which is how a fleet ends up holding stock with nothing to sell it — and the
+ * feed is the place an operator is most likely to notice.
+ */
+const CONTROL_PHRASE: Record<string, string> = {
+  "bot.start": "Bot started",
+  "bot.stop": "Bot stopped",
+  "bot.restart": "Bot restarted",
+  "bot.purgeTrades": "Trades purged",
+  "bot.setLimits": "Limits changed",
+  "position.recoverStranded": "Exits replaced",
+};
+
+const CONTROL_CONSEQUENCE: Record<string, string> = {
+  "bot.start": "It is trading again",
+  "bot.stop": "Its resting exit orders were cancelled, so any open position now has no sell order",
+  "bot.restart": "It was stopped and started again",
+  "bot.purgeTrades": "Every trade of this bot was deleted, and that cannot be undone",
+  "bot.setLimits": "Its capital cap or minimum profit changed",
+  "position.recoverStranded": "Replacement exit orders were placed at their original targets",
+};
 
 type RegimePolicyRow = {
   botId: number;
@@ -101,6 +161,73 @@ function safeParse(raw: string): unknown {
 }
 
 type AuthedRequest = FastifyRequest & { actor?: Actor };
+
+/**
+ * What the AI may do unattended, spend, and whether it may act at all.
+ *
+ * Module scope rather than per-registration, so the limits survive anything
+ * that re-registers the plugin and cannot be reset by asking again.
+ */
+const aiGuards = createAiGuards();
+
+/**
+ * The AI's own health, as ordinary health checks.
+ *
+ * Three separate questions, because an operator needs to tell them apart: is a
+ * provider configured at all, has the AI been switched off, and is it about to
+ * run out of budget. "The AI is quiet" has very different causes and none of
+ * them were visible on the health page before.
+ *
+ * A provider that is simply not configured is `ok`, not a warning — running
+ * deterministic-only is a supported way to run, not a fault.
+ */
+function aiHealthChecks(): HealthCheck[] {
+  const provider = resolveProvider();
+  const budget = aiGuards.budget.spent();
+  const stopped = aiGuards.killSwitch.isStopped();
+
+  const checks: HealthCheck[] = [
+    {
+      id: "ai.provider",
+      group: "AI",
+      label: "AI provider",
+      status: "ok",
+      value: provider?.model ? `${provider.id} · ${provider.model}` : "not configured",
+      detail: provider?.model
+        ? "The council can reach a model. Trading never blocks on it: every failure path falls back to the deterministic agents."
+        : "No provider is set, so the council runs deterministic-only. That is a supported configuration, not a fault.",
+      metric: null,
+    },
+    {
+      id: "ai.switch",
+      group: "AI",
+      label: "AI enabled",
+      status: stopped ? "warn" : "ok",
+      value: stopped ? "switched off" : "on",
+      detail: stopped
+        ? "Someone stopped the AI, or AI_DISABLED=1 is set. It will not answer or act until it is switched back on."
+        : "The AI may answer and, when you approve or arm it, act.",
+      metric: null,
+    },
+  ];
+
+  // Only worth a row when there is a ceiling to be near.
+  if (budget.limit > 0) {
+    const used = Math.round((budget.used / budget.limit) * 100);
+
+    checks.push({
+      id: "ai.budget",
+      group: "AI",
+      label: "AI token budget",
+      status: used >= 100 ? "crit" : used >= 80 ? "warn" : "ok",
+      value: `${used}% of ${budget.limit.toLocaleString()}`,
+      detail: `${budget.used.toLocaleString()} tokens used on ${budget.day}. At 100% the chat stops answering until midnight UTC; raise AI_DAILY_TOKEN_BUDGET to change the ceiling.`,
+      metric: used,
+    });
+  }
+
+  return checks;
+}
 
 export async function dashboardRestRoutes(fastify: FastifyInstance) {
   /** Authenticate every route in this plugin and apply the read rate limit. */
@@ -160,6 +287,8 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/events", params: { since: "epoch ms cursor, 0 to initialise", limit: "1-200" }, description: "Events since a cursor. Pass 0 first to get a cursor without replaying history." },
       { path: "GET /api/dash/logs", params: { botId: "number", limit: "1-200" }, description: "Recent bot log entries." },
       { path: "GET /api/dash/actions/log", params: { since: "epoch ms" }, description: "Audit trail of control actions." },
+      { path: "GET /api/dash/ai/actions", params: { since: "sequence cursor, 0 to initialise", session: "session id from a previous response", limit: "1-500" }, description: "What the AI has done, newest last: council calls, orders, risk blocks, cap changes and settings changes. In-memory since the daemon started; the cursor is a sequence number, not a timestamp." },
+      { path: "GET /api/dash/ai/status", params: {}, description: "Whether the AI is configured, switched on, how many unattended actions it has left, and today's token spend against its budget." },
       { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
       { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
       { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
@@ -192,8 +321,12 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/actions/learning.dismiss", body: { id: "number" }, scope: "control", description: "Dismiss a proposal without applying it." },
       { path: "GET /api/dash/ai-settings", params: {}, description: "The saved LLM configuration (key masked) for the AI council." },
       { path: "POST /api/dash/actions/ai-settings.save", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Save and instantly apply the AI council's provider/model. provider 'none' disables it." },
-      { path: "POST /api/dash/actions/ai-models", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Fetch the model ids a provider offers, for the settings picker." },
+      { path: "POST /api/dash/actions/ai-models", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Fetch the models a provider offers, for the settings picker. Each is { id, name, description, free, contextLength }; `free` is true when the model says so or prices at zero." },
       { path: "POST /api/dash/actions/ai-settings.test", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Verify a provider configuration by listing its models." },
+      { path: "POST /api/dash/actions/ai-chat", body: { messages: "[{ role: user|assistant, content: string }]" }, scope: "control", description: "Ask the configured model about the fleet. Returns { reply, proposals, model }. Executes nothing — a proposal is carried out by a separate call to ai-execute." },
+      { path: "POST /api/dash/actions/ai-execute", body: { proposal: "{ action, params, why }", autonomous: "boolean, optional" }, scope: "control", description: `Carry out one proposal from ai-chat. Allowed actions: ${Object.keys(ALLOWED_ACTIONS).join(", ")}. Dispatched through the same guarded route an operator would call, so scope, freeze, rate limit and audit all apply. With autonomous:true it also spends from the unattended-action budget, which is enforced here and not in the browser.` },
+      { path: "POST /api/dash/actions/ai.disable", body: { reason: "string, optional" }, scope: "control", description: "Stop the AI acting or answering. Unlike /actions/freeze this leaves your own control endpoints working, so you can clean up after it." },
+      { path: "POST /api/dash/actions/ai.enable", body: {}, scope: "control", description: "Let the AI act again, and start its unattended-action allowance over." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -304,7 +437,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const startedAt = Date.now();
     const [context, lastBotActivity] = await Promise.all([derived(), dashboardService.lastBotActivity(OWNER_ID)]);
 
-    return buildHealthView({
+    const report = buildHealthView({
       derived: context,
       database: dashboardService.getDatabaseStats(),
       databasePath: dashboardService.databaseFile(),
@@ -314,6 +447,20 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       paperFillPatchApplied: dashboardService.hasPaperFillFix(),
       apiLatencyMs: Date.now() - startedAt,
     });
+
+    /*
+     * The AI checks are appended here rather than built into `buildHealthView`.
+     *
+     * That builder lives in `@opentrader/trpc`, which does not depend on
+     * `@opentrader/ai-team` and should not start to — the guards and the
+     * provider are visible from this package, and the health report is a list
+     * of checks with a worst-wins rollup, so adding to it is additive.
+     */
+    const checks = [...report.checks, ...aiHealthChecks()];
+    const counts: Record<HealthStatus, number> = { ok: 0, warn: 0, crit: 0, unknown: 0 };
+    for (const check of checks) counts[check.status] += 1;
+
+    return { ...report, checks, counts, status: rollUp(checks) };
   });
 
   /**
@@ -441,6 +588,45 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     actions: agentAccess.actions(num((request.query as Record<string, unknown>).since) ?? 0),
   }));
 
+  /**
+   * What the AI has done, oldest first so a client can append.
+   *
+   * The cursor is the journal's sequence number, not a timestamp: a council tick
+   * records its verdict and the order it placed within the same millisecond, and
+   * a timestamp cursor would silently drop the second one.
+   *
+   * `session` identifies the buffer. Sequence numbers restart at zero when the
+   * daemon restarts, so a client holding a cursor from the previous run would
+   * otherwise sit silent forever waiting for a number that will never come
+   * again. Sending back a session that is not the current one replays from the
+   * top instead.
+   */
+  fastify.get("/ai/actions", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const session = str(query.session);
+    const stale = session !== undefined && session !== aiActivity.session;
+    const since = stale ? 0 : (num(query.since) ?? 0);
+    const limit = Math.min(Math.max(num(query.limit) ?? 200, 1), 500);
+
+    const actions = aiActivity.since(since, limit);
+
+    // The strategy knows a bot by id — it never loaded a name. Filling them in
+    // here means every consumer gets a line it can show as it stands.
+    const missing = actions.some((action: AiActionRecord) => action.botId !== null && !action.botName);
+    const names = missing ? (await dashboardService.getContext(OWNER_ID)).botNames : null;
+
+    return {
+      session: aiActivity.session,
+      cursor: aiActivity.cursor(),
+      restarted: stale,
+      actions: actions.map((action: AiActionRecord) =>
+        action.botId !== null && !action.botName
+          ? { ...action, botName: names?.get(action.botId) ?? `Bot ${action.botId}` }
+          : action,
+      ),
+    };
+  });
+
   // --- Control -------------------------------------------------------------
 
   /** Shared guard: scope, freeze switch, rate limit and audit for one action. */
@@ -456,6 +642,16 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const deny = (code: number, error: string, detail: string) => {
       agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId: botId ?? null }, outcome: "denied", detail });
+
+      // A refusal is worth seeing on the board too. An agent quietly failing to
+      // act looks identical to an agent choosing not to, and they are very
+      // different problems.
+      recordAiAction({
+        chip: "denied",
+        title: `${CONTROL_PHRASE[action] ?? action} refused`,
+        detail: `${actor.name} was refused: ${detail}`,
+        botId: botId ?? null,
+      });
 
       return reply.code(code).send({ error, message: detail });
     };
@@ -474,10 +670,29 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "allowed", detail: null });
       logger.info(`[Dashboard] ${actor.kind} "${actor.name}" performed ${action} on bot ${botId}`);
 
+      recordAiAction({
+        chip: "adjust",
+        severity: action === "bot.purgeTrades" ? "danger" : action === "bot.stop" ? "warning" : "info",
+        title: CONTROL_PHRASE[action] ?? action,
+        detail: `${CONTROL_CONSEQUENCE[action] ?? "Done"} — by ${actor.name}.`,
+        botId,
+        // Only the execute route can set this, and only once per nonce it
+        // minted moments earlier. A caller cannot label their own action as the
+        // AI's, or the AI's as their own, by setting a header.
+        autonomous: aiGuards.nonces.consume(request.headers["x-ai-nonce"] as string | undefined),
+      });
+
       return { ok: true, action, botId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "failed", detail: message });
+
+      recordAiAction({
+        chip: "denied",
+        title: `${CONTROL_PHRASE[action] ?? action} failed`,
+        detail: message,
+        botId,
+      });
 
       return reply.code(409).send({ error: "action_failed", message });
     }
@@ -789,7 +1004,13 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: "bad_request", message: `an API key for ${providerId} is required` });
     }
 
-    const models = await listModels({ id: providerId as ProviderId, model: "", baseUrl, ...(apiKey ? { apiKey } : {}) });
+    const models = await listModelCatalog({
+      id: providerId as ProviderId,
+      model: "",
+      baseUrl,
+      ...(apiKey ? { apiKey } : {}),
+    });
+
     if (models.length === 0) {
       return reply.code(502).send({
         error: "unavailable",
@@ -797,9 +1018,305 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       });
     }
 
-    return { ok: true, models };
+    // `free` is counted here rather than in the browser so an external agent
+    // reading this endpoint gets the same answer the picker shows.
+    return { ok: true, models, freeCount: models.filter((model: ModelInfo) => model.free).length };
   });
 
+
+  // --- Chat ----------------------------------------------------------------
+
+  /**
+   * Assemble what the assistant is allowed to see.
+   *
+   * The fleet as the dashboard shows it, plus the three things an operator most
+   * often asks about that are not in the snapshot: stranded positions, the
+   * council's standing convictions, and learning proposals waiting on a
+   * decision. No credentials, no share links, no host details.
+   */
+  async function buildChatContext(): Promise<ChatContext> {
+    /*
+     * Everything here comes from the snapshot the dashboard already builds.
+     *
+     * This used to call `findStrandedPositions`, which loads every smart trade
+     * this owner has ever had with all of its orders attached — on every single
+     * chat message. `positions.abandoned` is the same number: `summarizePositions`
+     * counts every position whose exit state is not "live", which is precisely a
+     * position holding stock with nothing working to sell it.
+     */
+    const snapshot = buildSnapshot(await derived(), {});
+
+    const convictionRows = (await xprisma.regimeConviction.findMany({
+      orderBy: { asOf: "desc" },
+      take: 60,
+    })) as RegimeConvictionRow[];
+
+    const latestPerSymbol = new Map<string, RegimeConvictionRow>();
+    for (const row of convictionRows) if (!latestPerSymbol.has(row.symbol)) latestPerSymbol.set(row.symbol, row);
+
+    const proposals = (await xprisma.learningJournal.findMany({
+      where: { status: "proposed" },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    })) as LearningRow[];
+
+    const now = Date.now();
+
+    return {
+      fleet: {
+        realisedPnl: snapshot.fleet.realized.netPnl,
+        floatingPnl: snapshot.fleet.positions.floatingPnl,
+        openPositions: snapshot.fleet.positions.open,
+      },
+      health: null,
+      bots: snapshot.bots.map((bot) => ({
+        botId: bot.botId,
+        name: bot.name,
+        symbol: bot.symbol,
+        enabled: bot.enabled,
+        netPnl: bot.realized.netPnl,
+        floatingPnl: bot.positions.floatingPnl,
+        trades: bot.realized.trades,
+        openPositions: bot.positions.open,
+        strandedPositions: bot.positions.abandoned,
+      })),
+      convictions: [...latestPerSymbol.values()].map((row) => ({
+        symbol: row.symbol,
+        stance: row.stance,
+        confidence: row.confidence,
+        ageHours: (now - Number(row.asOf)) / 3_600_000,
+      })),
+      openProposals: proposals.map((row) => ({ id: row.id, botName: row.botName, lossStreak: row.lossStreak })),
+    };
+  }
+
+  /** Chat is cheap per call but bills per token; this keeps a stuck loop bounded. */
+  const chatLimiter = new RateLimiter(20, 60_000);
+
+  /**
+   * Ask the configured model about the fleet.
+   *
+   * Returns prose plus any proposals it made, already validated against the
+   * allowlist. **Nothing is executed here** — carrying a proposal out is a
+   * separate call to /actions/ai-execute, which is what lets the same code path
+   * serve both a confirmation click and the autopilot switch.
+   */
+  fastify.post("/actions/ai-chat", async (request: AuthedRequest, reply) => {
+    const permission = agentAccess.canControl(request.actor!);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const running = aiGuards.killSwitch.check();
+    if (!running.allowed) return reply.code(503).send({ error: "ai_disabled", message: running.reason });
+
+    // Checked before the call, recorded after it: a request that is refused
+    // costs nothing and should not be billed against the day.
+    const affordable = aiGuards.budget.check();
+    if (!affordable.allowed) return reply.code(429).send({ error: "budget_exhausted", message: affordable.reason });
+
+    const limit = chatLimiter.check(request.actor!.name);
+    if (!limit.allowed) {
+      return reply
+        .code(429)
+        .send({ error: "rate_limited", message: `Too many questions at once, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s` });
+    }
+
+    const provider = resolveProvider();
+    if (!provider || !provider.model) {
+      return reply.code(503).send({
+        error: "unavailable",
+        message: "No AI provider is configured. Set one in AI settings first.",
+      });
+    }
+
+    const body = (request.body ?? {}) as { messages?: unknown };
+    const messages = (Array.isArray(body.messages) ? body.messages : [])
+      .filter((entry): entry is ChatMessage => Boolean(entry) && typeof entry === "object")
+      .map((entry) => ({
+        role: entry.role === "assistant" ? ("assistant" as const) : ("user" as const),
+        content: String(entry.content ?? ""),
+      }))
+      .filter((entry) => entry.content);
+
+    if (messages.length === 0) return reply.code(400).send({ error: "bad_request", message: "Nothing to answer" });
+
+    const answer = await chatCompletionDetailed(provider, {
+      system: SYSTEM_PROMPT,
+      user: buildUserTurn(await buildChatContext(), messages),
+      maxTokens: 1200,
+      timeoutMs: 45_000,
+    });
+
+    if (answer === null) {
+      return reply.code(502).send({
+        error: "unavailable",
+        message: `${provider.id} did not answer. Check the key and the model id in AI settings.`,
+      });
+    }
+
+    aiGuards.budget.record(answer.tokens);
+    logger.info(
+      `[AI] chat via ${provider.id}/${provider.model}: ${answer.tokens} tokens, ${aiGuards.budget.spent().used} used today`,
+    );
+
+    const { prose, proposals } = extractProposals(answer.text);
+
+    // A proposal the model is not allowed to make is dropped and reported, not
+    // silently swallowed: the operator should know it tried.
+    const checked = proposals.map((proposal: Proposal) => validateProposal(proposal));
+    const allowed = checked.filter((result) => result.ok).map((result) => (result as { proposal: Proposal }).proposal);
+    const refused = checked.filter((result) => !result.ok).map((result) => (result as { reason: string }).reason);
+
+    return {
+      reply: refused.length > 0 ? `${prose}\n\n(Ignored: ${refused.join("; ")}.)` : prose,
+      proposals: allowed,
+      model: `${provider.id} · ${provider.model}`,
+    };
+  });
+
+  /**
+   * Carry out exactly one validated proposal.
+   *
+   * Dispatched back through this plugin's own routes rather than calling the
+   * executors directly, so a proposal goes through the identical path an
+   * operator's click takes: scope check, freeze switch, rate limit, audit
+   * record, and an entry in the AI action feed. There is no second, softer way
+   * in — which is the property that makes arming autopilot a reviewable
+   * decision rather than an open door.
+   */
+  fastify.post("/actions/ai-execute", async (request: AuthedRequest, reply) => {
+    const permission = agentAccess.canControl(request.actor!);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const running = aiGuards.killSwitch.check();
+    if (!running.allowed) return reply.code(503).send({ error: "ai_disabled", message: running.reason });
+
+    const body = (request.body ?? {}) as { proposal?: Proposal; autonomous?: unknown };
+    const proposal = body.proposal;
+    if (!proposal || typeof proposal !== "object") {
+      return reply.code(400).send({ error: "bad_request", message: "No proposal given" });
+    }
+
+    const validation = validateProposal(proposal);
+    if (!validation.ok) return reply.code(400).send({ error: "bad_request", message: validation.reason });
+
+    const unattended = body.autonomous === true;
+
+    /*
+     * The autopilot budget, enforced where it cannot be edited.
+     *
+     * The dashboard counts down from twenty and disarms itself, but that
+     * counter lives in a browser tab: a reload re-arms it, a bug can ignore it,
+     * and a direct caller never had it. This is the copy that decides.
+     */
+    if (unattended) {
+      const budget = aiGuards.autonomy.check();
+      if (!budget.allowed) {
+        recordAiAction({
+          chip: "denied",
+          title: "Autopilot limit reached",
+          detail: budget.reason,
+          botId: typeof validation.proposal.params.botId === "number" ? validation.proposal.params.botId : null,
+        });
+
+        return reply.code(429).send({ error: "autonomy_exhausted", message: budget.reason });
+      }
+    }
+
+    const target = ALLOWED_ACTIONS[validation.proposal.action];
+
+    /*
+     * A single-use nonce, not a header the caller controls.
+     *
+     * The inner route reads it to decide whether the journal entry is marked
+     * unattended. As a plain `x-ai-autonomous: 1` header, anyone could set it on
+     * a direct request and forge the audit trail in either direction.
+     */
+    const nonce = unattended ? aiGuards.nonces.issue(randomUUID()) : "";
+
+    const result = await fastify.inject({
+      method: "POST",
+      url: `/api/dash/actions/${target.path}`,
+      headers: {
+        "content-type": "application/json",
+        authorization: request.headers.authorization ?? "",
+        "x-agent-token": (request.headers["x-agent-token"] as string) ?? "",
+        "x-ai-nonce": nonce,
+      },
+      payload: validation.proposal.params,
+    });
+
+    const payload = result.json<Record<string, unknown>>();
+
+    if (result.statusCode >= 400) {
+      return reply.code(result.statusCode).send(payload);
+    }
+
+    // Counted only on success. A refused action cost nothing and spending the
+    // budget on it would let a run of failures lock out the working ones.
+    if (unattended) aiGuards.autonomy.record();
+
+    return {
+      ok: true,
+      action: validation.proposal.action,
+      result: payload,
+      autonomyRemaining: aiGuards.autonomy.remaining(),
+    };
+  });
+
+  /**
+   * Stop the AI, or start it again.
+   *
+   * Deliberately separate from `/actions/freeze`. Freezing disables every agent
+   * control path, including the buttons an operator would use to undo whatever
+   * the AI just did — so the moment you most want to stop it is the moment
+   * freezing takes your own tools away too. This stops the AI and leaves you
+   * yours.
+   */
+  fastify.post("/actions/ai.disable", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const reason = str((request.body as Record<string, unknown> | undefined)?.reason) ?? `stopped by ${actor.name}`;
+
+    aiGuards.killSwitch.stop(reason);
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai.disable", target: {}, outcome: "allowed", detail: reason });
+    logger.warn(`[AI] disabled: ${reason}`);
+
+    recordAiAction({ chip: "settings", severity: "warning", title: "AI switched off", detail: reason });
+
+    return { ok: true, stopped: true };
+  });
+
+  fastify.post("/actions/ai.enable", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    aiGuards.killSwitch.start();
+    // A deliberate re-enable starts the unattended allowance over: the operator
+    // has looked at what happened and decided it may carry on.
+    aiGuards.autonomy.reset();
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai.enable", target: {}, outcome: "allowed", detail: null });
+    logger.info(`[AI] re-enabled by ${actor.name}`);
+
+    recordAiAction({ chip: "settings", title: "AI switched back on", detail: `Re-enabled by ${actor.name}.` });
+
+    return { ok: true, stopped: false };
+  });
+
+  /** What the guards currently allow, for the dashboard and for health checks. */
+  fastify.get("/ai/status", async () => {
+    const provider = resolveProvider();
+
+    return {
+      configured: Boolean(provider && provider.model),
+      provider: provider ? { id: provider.id, model: provider.model } : null,
+      stopped: aiGuards.killSwitch.isStopped(),
+      autonomyRemaining: aiGuards.autonomy.remaining(),
+      budget: aiGuards.budget.spent(),
+    };
+  });
 
   /**
    * Conviction history, oldest first, so the dashboard can draw the council

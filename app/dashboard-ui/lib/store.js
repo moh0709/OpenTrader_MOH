@@ -7,6 +7,7 @@
  */
 const SETTINGS_KEY = "otAnalytics.settings.v1";
 const LAYOUT_KEY = "otAnalytics.layout.v1";
+const BOARD_KEY = "otAnalytics.board.v2";
 const CURSOR_KEY = "otAnalytics.eventCursor.v1";
 
 export const DEFAULT_SETTINGS = {
@@ -23,6 +24,8 @@ export const DEFAULT_SETTINGS = {
   dustThreshold: 1,
   leaderboardMetric: "netPnl",
   widgetHeight: "auto",
+  /** Ring the row an AI action touched and explain it in a bubble beside it. */
+  highlightAiActions: true,
 };
 
 function read(key, fallback) {
@@ -46,12 +49,22 @@ function write(key, value) {
   }
 }
 
+function remove(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Same reasoning as `write`: storage being unavailable is not an error here.
+  }
+}
+
 class Store {
   constructor() {
     this.settings = { ...DEFAULT_SETTINGS, ...read(SETTINGS_KEY, {}) };
     this.data = {
       snapshot: null,
       health: null,
+      /** Open positions from the refresh tick, shared by the ticker and widgets. */
+      positions: null,
       /** Recipients currently watching a shared live feed. */
       watchers: [],
       /** Per-widget slices keyed by widget instance id. */
@@ -88,6 +101,12 @@ class Store {
     this.status.lastUpdated = Date.now();
     this.status.error = null;
     this.emit("snapshot");
+  }
+
+  /** Open positions, as the bottom ticker and the position widgets read them. */
+  setPositions(positions) {
+    this.data.positions = positions;
+    this.emit("positions");
   }
 
   setHealth(health) {
@@ -146,10 +165,24 @@ class Store {
 
 export const store = new Store();
 
+/**
+ * The pre-tabs board, kept for one release.
+ *
+ * Read by the migration and never written to again. It costs a few kilobytes
+ * and it is the only way back if the migration turns out to have been wrong
+ * about somebody's board.
+ */
 export const layoutStorage = {
   load: () => read(LAYOUT_KEY, null),
   save: (layout) => write(LAYOUT_KEY, layout),
-  clear: () => window.localStorage.removeItem(LAYOUT_KEY),
+  clear: () => remove(LAYOUT_KEY),
+};
+
+/** The tabbed board: every tab, its widgets, and which one is open. */
+export const boardStorage = {
+  load: () => read(BOARD_KEY, null),
+  save: (board) => write(BOARD_KEY, board),
+  clear: () => remove(BOARD_KEY),
 };
 
 export const cursorStorage = {

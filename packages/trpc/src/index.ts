@@ -32,5 +32,8 @@ export {
 export { BotService } from "./services/bot.service.js";
 export { dashboardService, type BotLogRow } from "./services/dashboard.service.js";
 export * from "./services/dashboard-views.js";
-export { agentAccess, type Actor, type AgentScope, type AgentActionRecord } from "./services/agent-access.js";
+export { RateLimiter, agentAccess, type Actor, type AgentScope, type AgentActionRecord } from "./services/agent-access.js";
 export type { BucketSize, DashboardEvent, LeaderboardMetric } from "./services/analytics/index.js";
+// Exported so a package that knows about something this one does not — the AI
+// layer, say — can add its own checks to the report and roll them up the same way.
+export { rollUp, type HealthCheck, type HealthStatus } from "./services/analytics/health.js";

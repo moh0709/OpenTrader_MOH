@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
+import type { AnyRouter } from "@trpc/server";
 import { appRouter } from "@opentrader/trpc";
 import { dashboardRestRoutes } from "./rest/dashboard-routes.js";
 import { shareRoutes } from "./rest/share-routes.js";
@@ -56,10 +57,24 @@ export const createServer = (params: CreateServerOptions) => {
     });
   }
 
+  /*
+   * The cast is a module-resolution workaround, not a design choice.
+   *
+   * Under `moduleResolution: NodeNext`, `@trpc/server` resolves to two distinct
+   * declaration files from the same installed copy — one under
+   * `resolution-mode: "import"` and one without. TypeScript treats the two
+   * `AnyRouter`s as different nominal types, so `appRouter` (typed through
+   * `@opentrader/trpc`'s emitted declarations) can never satisfy the adapter's
+   * parameter, whichever way the options are annotated.
+   *
+   * It is narrowed to the router alone so `createContext` is still checked
+   * against the real signature, which is where a genuine mistake would be.
+   * Remove it if tRPC ever ships a single declaration entry point.
+   */
   fastify.register(fastifyTRPCPlugin, {
     prefix: "/api/trpc",
     trpcOptions: {
-      router: appRouter,
+      router: appRouter as unknown as AnyRouter,
       createContext,
     },
   });

@@ -93,7 +93,9 @@ export const learningJournalWidget = {
           );
         }
 
-        return el("div", { class: "cv-card" }, [
+        // Anchors for the AI action bubbles: a lesson applied to this bot rings
+        // the card it came from.
+        return el("div", { class: "cv-card", dataset: { botId: String(entry.botId), symbol: entry.symbol } }, [
           el("div", { class: "cv-card__head" }, [
             el("span", { class: "cv-card__symbol", text: `${entry.botName} · ${entry.symbol}` }),
             badge(label, variant || undefined),

@@ -424,3 +424,48 @@ model AiSettings {
 
   updatedAt DateTime @updatedAt
 }
+
+/// One thing the AI did, kept so the feed survives a restart.
+///
+/// The dashboard reads a 500-entry in-process ring, which is what makes the
+/// live feed instant and free. This table is the same records written through,
+/// so a redeploy does not blank the AI action window and the news lane. The
+/// daemon reloads the most recent rows at boot.
+///
+/// Applied with `prisma db push`, as `RegimePolicy`, `RegimeConviction`,
+/// `LearningJournal` and `AiSettings` were: this fork's schema is the source of
+/// truth and its database has no `_prisma_migrations` table to deploy against.
+/// Nothing breaks if the table is absent — the daemon degrades to ring-only.
+model AiAction {
+  id Int @id @default(autoincrement())
+
+  /// Epoch ms the action happened.
+  at BigInt
+
+  /// analysis | decision | open | close | take-profit | adjust | risk | cap |
+  /// learning | settings | denied
+  chip String
+
+  /// info | success | warning | danger
+  severity String
+
+  botId        Int?
+  botName      String?
+  symbol       String?
+  smartTradeId Int?
+
+  /// Capped at the source: 48 characters for the title, 140 for the detail.
+  title  String
+  detail String
+
+  /// What the dashboard should point at, JSON stringified.
+  target String
+
+  /// True when autopilot did this without anyone confirming it.
+  autonomous Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  /// The feed is always read newest-first, over a window.
+  @@index([at])
+}

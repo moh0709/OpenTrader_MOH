@@ -1,5 +1,6 @@
 import { logger } from "@opentrader/logger";
 import { xprisma } from "@opentrader/db";
+import { recordAiAction } from "@opentrader/ai-team";
 import {
   applyRegimeGovernor,
   describeRegimeDecision,
@@ -97,6 +98,13 @@ export async function mirrorConvictions(symbols: string[]): Promise<Map<string, 
     });
 
     logger.info(`[Regime] New conviction for ${conviction.symbol}: ${conviction.stance} @ ${conviction.confidence.toFixed(2)}`);
+
+    recordAiAction({
+      chip: "analysis",
+      title: `Council reads ${conviction.symbol}`,
+      detail: `${conviction.stance.replace(/_/g, " ")} at ${Math.round(conviction.confidence * 100)}% confidence. ${conviction.summary}`,
+      symbol: conviction.symbol,
+    });
   }
 
   return convictions;
@@ -182,6 +190,21 @@ export async function syncRegime(): Promise<RegimeSyncResult> {
     changed += 1;
 
     logger.info(`[Regime] ${describeRegimeDecision(decision, bot.name)}`);
+
+    const conviction = convictions.get(bot.symbol);
+    const direction = decision.reduced ? "cut" : "restored";
+
+    recordAiAction({
+      chip: "cap",
+      severity: decision.reduced ? "warning" : "info",
+      title: `Cap ${direction} on ${bot.name}`,
+      detail: conviction
+        ? `Now ${(target ?? 0).toFixed(2)} — council is ${conviction.stance.replace(/_/g, " ")} on ${bot.symbol}.`
+        : `Now ${(target ?? 0).toFixed(2)} — ${decision.notes[decision.notes.length - 1] ?? "back to your baseline"}.`,
+      botId: bot.id,
+      botName: bot.name,
+      symbol: bot.symbol,
+    });
   }
 
   return { polled: bots.length, changed, unreachable };
@@ -206,6 +229,13 @@ export async function disarmRegime(): Promise<{ restored: number }> {
   }
 
   logger.warn(`[Regime] Disarmed. Restored ${restored} bots to their baseline caps.`);
+
+  recordAiAction({
+    chip: "settings",
+    severity: "warning",
+    title: "Regime governor disarmed",
+    detail: `${restored} bot${restored === 1 ? "" : "s"} put back on your baseline cap. Convictions no longer move capital.`,
+  });
 
   return { restored };
 }

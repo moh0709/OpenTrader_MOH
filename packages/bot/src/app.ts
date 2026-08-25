@@ -21,7 +21,10 @@ import { createServer, CreateServerOptions } from "./server.js";
 import { RegimeService } from "./regime/regime.service.js";
 import { startLearningLoop } from "./learning/learning.service.js";
 import { setRuntimeProvider } from "@opentrader/ai-team";
+import { dashboardService } from "@opentrader/trpc";
 import { bootstrapPlatform, type Platform } from "./platform.js";
+import { runPreflight } from "./preflight.js";
+import { startAiJournalStore } from "./ai/ai-journal-store.js";
 
 type AppParams = {
   server: CreateServerOptions;
@@ -43,11 +46,22 @@ export class App {
   private logPruneTimer: NodeJS.Timeout | null = null;
   private regime = new RegimeService();
   private stopLearning: (() => void) | null = null;
+  private stopAiJournal: (() => void) | null = null;
 
   constructor(
     private platform: Platform,
     private server: ReturnType<typeof createServer>,
+    serverOptions?: CreateServerOptions,
   ) {
+    // Said once, at boot, before anything starts trading. Warnings only: a
+    // daemon that refuses to start is a daemon not managing open positions,
+    // which is a worse outcome than the configuration it objected to.
+    runPreflight({
+      env: process.env,
+      host: serverOptions?.host ?? "",
+      databasePath: dashboardService.databaseFile(),
+    });
+
     this.startLogPruning();
     this.regime.start();
     // Restore the operator's saved AI settings before any strategy can tick,
@@ -74,6 +88,15 @@ export class App {
     // The learning sweep is advisory and off the trading path; it only ever
     // writes journal proposals, which a human applies.
     this.stopLearning = startLearningLoop(OWNER_ID);
+
+    // Bring the AI action feed back from the database, and keep writing to it.
+    // Best-effort throughout: an install without the table logs one line and
+    // carries on with the in-memory feed.
+    void startAiJournalStore()
+      .then((stop) => {
+        this.stopAiJournal = stop;
+      })
+      .catch((err) => logger.warn(`[AI] Action history unavailable: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   /**
@@ -120,7 +143,7 @@ export class App {
     logger.info(`RPC Server listening on port ${params.server.port}`);
     logger.info(`OpenTrader UI: http://${params.server.host}:${params.server.port}`);
 
-    return new App(platform, server);
+    return new App(platform, server, params.server);
   }
 
   /**
@@ -147,6 +170,11 @@ export class App {
     if (this.stopLearning) {
       this.stopLearning();
       this.stopLearning = null;
+    }
+
+    if (this.stopAiJournal) {
+      this.stopAiJournal();
+      this.stopAiJournal = null;
     }
 
     await this.server.close();

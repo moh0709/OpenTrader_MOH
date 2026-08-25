@@ -7,6 +7,12 @@
  *
  * The key is write-only from here: the backend reports only a mask, and a blank
  * field means "keep the stored key" rather than "clear it".
+ *
+ * The model picker is a real list rather than a `<datalist>`. OpenRouter alone
+ * offers several hundred models and a datalist gives you no way to see what you
+ * are choosing between, no way to narrow it, and no way to tell a free model
+ * from one that bills per token — which is the single distinction most people
+ * are actually trying to make.
  */
 import { el, mount } from "./dom.js";
 import { getPassword } from "./api.js";
@@ -23,6 +29,9 @@ const PROVIDERS = [
   { value: "custom", label: "Custom endpoint", needsKey: false },
 ];
 
+/** Longest list we will draw at once. Past this, narrow it with the search. */
+const MAX_ROWS = 200;
+
 async function dash(path, body) {
   const response = await fetch(`/api/dash/${path}`, {
     method: body ? "POST" : "GET",
@@ -33,6 +42,32 @@ async function dash(path, body) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
   return payload;
+}
+
+/**
+ * Models matching the current filters.
+ *
+ * Pure, and exported so the matching rules can be tested without a browser:
+ * the search reads the id, the name and the description, because people look
+ * for models by all three ("haiku", "Claude Haiku", "fast and cheap").
+ */
+export function filterModels(models, { search = "", freeOnly = false } = {}) {
+  const needle = search.trim().toLowerCase();
+
+  return models.filter((model) => {
+    if (freeOnly && !model.free) return false;
+    if (!needle) return true;
+
+    return `${model.id} ${model.name} ${model.description}`.toLowerCase().includes(needle);
+  });
+}
+
+/** "131072" -> "131K", so a row can carry the context length without shouting. */
+export function shortContext(length) {
+  if (!length || !Number.isFinite(length)) return "";
+  if (length >= 1_000_000) return `${Math.round(length / 100_000) / 10}M`;
+
+  return length >= 1000 ? `${Math.round(length / 1000)}K` : String(length);
 }
 
 export async function renderAiSettings(container) {
@@ -65,18 +100,190 @@ export async function renderAiSettings(container) {
   const modelInput = el("input", {
     class: "input",
     type: "text",
-    list: "ai-models-list",
     autocomplete: "off",
-    placeholder: "Model — pick after fetching, or type an id",
+    role: "combobox",
+    "aria-expanded": "false",
+    "aria-controls": "ai-model-list",
+    placeholder: "Model — fetch the list, or type an id",
     "aria-label": "Model",
   });
-  const datalist = el("datalist", { id: "ai-models-list" });
   const message = el("div", { class: "ais-message", role: "status" });
+
+  // ---- Model picker state ----
+
+  /** Everything the provider offers, as fetched. */
+  let catalog = [];
+  let freeOnly = false;
+  let open = false;
+  /** Keyboard cursor into the currently visible rows. -1 means "none". */
+  let active = -1;
+
+  const searchInput = el("input", {
+    class: "input input--sm",
+    type: "search",
+    autocomplete: "off",
+    placeholder: "Search models…",
+    "aria-label": "Search models",
+  });
+
+  const freeChip = el("button", {
+    class: "chip chip--filter",
+    type: "button",
+    "aria-pressed": "false",
+    title: "Show only models that cost nothing",
+  });
+
+  const listNode = el("div", {
+    class: "ais-list",
+    id: "ai-model-list",
+    role: "listbox",
+    "aria-label": "Available models",
+  });
+
+  const picker = el("div", { class: "ais-picker", hidden: true }, [
+    el("div", { class: "ais-filters" }, [searchInput, freeChip]),
+    listNode,
+  ]);
+
+  const toggle = el("button", {
+    class: "btn btn--icon ais-toggle",
+    type: "button",
+    title: "Show the model list",
+    "aria-label": "Show the model list",
+    text: "▾",
+  });
 
   const say = (text, isError) => {
     message.textContent = text;
     message.classList.toggle("ais-message--error", Boolean(isError));
   };
+
+  const visible = () => filterModels(catalog, { search: searchInput.value, freeOnly });
+
+  const choose = (model) => {
+    modelInput.value = model.id;
+    setOpen(false);
+    say(`${model.name}${model.free ? " — free" : ""}`);
+  };
+
+  function drawList() {
+    const rows = visible();
+    const freeCount = catalog.filter((model) => model.free).length;
+
+    freeChip.textContent = catalog.length ? `Free · ${freeCount}` : "Free";
+    freeChip.setAttribute("aria-pressed", String(freeOnly));
+    freeChip.dataset.on = String(freeOnly);
+
+    if (catalog.length === 0) {
+      return mount(listNode, el("div", { class: "ais-empty", text: "Fetch models to pick from a list, or type an id." }));
+    }
+
+    if (rows.length === 0) {
+      // Say which filter emptied it. "No results" leaves you guessing whether
+      // the provider has none or your search was simply too narrow.
+      const reason = freeOnly
+        ? searchInput.value.trim()
+          ? `No free model matches “${searchInput.value.trim()}”.`
+          : "This provider offers no free models."
+        : `No model matches “${searchInput.value.trim()}”.`;
+
+      return mount(listNode, el("div", { class: "ais-empty", text: reason }));
+    }
+
+    const shown = rows.slice(0, MAX_ROWS);
+
+    mount(
+      listNode,
+      ...shown.map((model, index) =>
+        el(
+          "button",
+          {
+            class: "ais-option",
+            type: "button",
+            role: "option",
+            "aria-selected": String(index === active),
+            dataset: { active: String(index === active) },
+            onclick: () => choose(model),
+          },
+          [
+            el("div", { class: "ais-option__main" }, [
+              el("span", { class: "ais-option__name", text: model.name }),
+              model.free ? el("span", { class: "chip chip--free", text: "Free" }) : null,
+              model.contextLength ? el("span", { class: "ais-option__ctx", text: shortContext(model.contextLength) }) : null,
+            ]),
+            el("div", { class: "ais-option__id", text: model.id }),
+          ],
+        ),
+      ),
+      shown.length < rows.length
+        ? el("div", { class: "ais-empty", text: `${rows.length - shown.length} more — narrow the search to see them.` })
+        : null,
+    );
+
+    listNode.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }
+
+  function setOpen(next) {
+    open = next;
+    picker.hidden = !next;
+    toggle.textContent = next ? "▴" : "▾";
+    modelInput.setAttribute("aria-expanded", String(next));
+    if (next) drawList();
+  }
+
+  const move = (delta) => {
+    const rows = visible();
+    if (rows.length === 0) return;
+
+    active = (active + delta + rows.length) % rows.length;
+    drawList();
+  };
+
+  searchInput.addEventListener("input", () => {
+    active = -1;
+    drawList();
+  });
+
+  freeChip.addEventListener("click", () => {
+    freeOnly = !freeOnly;
+    active = -1;
+    drawList();
+  });
+
+  toggle.addEventListener("click", () => setOpen(!open));
+
+  // Typing in the model field is always allowed — an id the provider does not
+  // list (a brand new model, a private deployment) must still be configurable.
+  modelInput.addEventListener("focus", () => {
+    if (catalog.length > 0) setOpen(true);
+  });
+
+  const onKeys = (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!open && catalog.length > 0) setOpen(true);
+      event.preventDefault();
+      move(event.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+
+    if (event.key === "Enter" && open && active >= 0) {
+      event.preventDefault();
+      const rows = visible();
+      if (rows[active]) choose(rows[active]);
+      return;
+    }
+
+    // Escape closes the list without closing the drawer behind it.
+    if (event.key === "Escape" && open) {
+      event.stopPropagation();
+      setOpen(false);
+    }
+  };
+
+  modelInput.addEventListener("keydown", onKeys);
+  searchInput.addEventListener("keydown", onKeys);
+
+  // ---- Form actions ----
 
   const currentProvider = () => providerSelect.value;
 
@@ -84,6 +291,15 @@ export async function renderAiSettings(container) {
     provider: currentProvider(),
     apiKey: keyInput.value.trim(),
     baseUrl: baseUrlInput.value.trim(),
+  });
+
+  // A different provider offers a different catalogue; keeping the old one on
+  // screen would invite picking a model the new provider has never heard of.
+  providerSelect.addEventListener("change", () => {
+    catalog = [];
+    active = -1;
+    setOpen(false);
+    drawList();
   });
 
   // Reflect the saved configuration into the form.
@@ -113,9 +329,11 @@ export async function renderAiSettings(container) {
     if (!currentProvider()) return say("Choose a provider first.", true);
     const done = busy(event.target, "Fetching…");
     try {
-      const { models } = await dash("actions/ai-models", payload());
-      mount(datalist, ...models.map((id) => el("option", { value: id })));
-      say(`${models.length} models available — click the model field to pick one.`);
+      const { models, freeCount } = await dash("actions/ai-models", payload());
+      catalog = models;
+      active = -1;
+      setOpen(true);
+      say(`${models.length} models available${freeCount ? `, ${freeCount} of them free` : ""}.`);
     } catch (error) {
       say(`Could not fetch models: ${error.message}`, true);
     }
@@ -164,6 +382,8 @@ export async function renderAiSettings(container) {
     }
   });
 
+  drawList();
+
   mount(
     container,
     status,
@@ -178,11 +398,10 @@ export async function renderAiSettings(container) {
       el("button", { class: "btn", type: "button", text: "Test connection", onclick: testConnection }),
     ]),
     el("label", { class: "ais-label", text: "Model" }),
-    modelInput,
-    datalist,
+    el("div", { class: "ais-combo" }, [modelInput, toggle]),
+    picker,
     message,
     el("button", { class: "btn btn--primary btn--block", type: "button", text: "Save and apply now", onclick: save }),
     disableButton,
   );
 }
-

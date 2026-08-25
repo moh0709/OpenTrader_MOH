@@ -59,8 +59,11 @@ export function summarizeMarketData(market: MarketData | undefined): BotLogConte
     summary.orderbook = {
       bids: bids?.length ?? 0,
       asks: asks?.length ?? 0,
-      bestBid: bids?.[0]?.[0] ?? null,
-      bestAsk: asks?.[0]?.[0] ?? null,
+      // `IBid`/`IAsk` are `{ price, quantity }`, not `[price, quantity]` tuples.
+      // Indexing them as tuples compiled to `undefined`, so every bot log has
+      // recorded a null best bid and ask since this summary was written.
+      bestBid: bids?.[0]?.price ?? null,
+      bestAsk: asks?.[0]?.price ?? null,
     };
   }
 

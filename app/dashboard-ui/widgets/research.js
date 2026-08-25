@@ -195,7 +195,8 @@ export const convictionBoardWidget = {
           const stale = c.ageMs > STALE_MS;
           const confidence = Math.round((c.confidence ?? 0) * 100);
 
-          return el("div", { class: `cv-card${stale ? " cv-card--stale" : ""}` }, [
+          // `data-symbol` is how an AI action about this market finds its card.
+          return el("div", { class: `cv-card${stale ? " cv-card--stale" : ""}`, dataset: { symbol: c.symbol } }, [
             el("div", { class: "cv-card__head" }, [
               el("span", { class: "rsrch-mono cv-card__symbol", text: c.symbol }),
               el("span", { class: `cv-card__stance ${stanceTone(c.stance)}`.trim(), text: STANCE_LABEL[c.stance] ?? c.stance }),

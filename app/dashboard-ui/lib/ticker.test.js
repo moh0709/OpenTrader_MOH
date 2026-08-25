@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markRising, statusOf, toTickerItem, toTickerItems } from "./ticker.js";
+import { markRising, statusOf, toNewsItems, toTickerItem, toTickerItems } from "./ticker.js";
 
 const position = (over = {}) => ({
   smartTradeId: 1,
@@ -133,5 +133,76 @@ describe("toTickerItems", () => {
     const items = toTickerItems([position({ smartTradeId: 1 }), position({ smartTradeId: 2, markPrice: null })], {});
 
     expect(items).toHaveLength(1);
+  });
+});
+
+describe("toNewsItems", () => {
+  const action = (chip, over = {}) => ({
+    id: `ai-${chip}`,
+    chip,
+    at: 1_700_000_000_000,
+    severity: "info",
+    botName: "Grid-ETH",
+    symbol: "ETH/USDT",
+    title: "Opened ETH/USDT",
+    detail: "Bought about 100.00 quote at market.",
+    autonomous: false,
+    ...over,
+  });
+
+  it("carries only what moved money or capital", () => {
+    const items = toNewsItems([
+      action("open"),
+      action("close"),
+      action("take-profit"),
+      action("risk"),
+      action("cap"),
+      action("adjust"),
+      action("analysis"),
+      action("decision"),
+      action("settings"),
+      action("learning"),
+      action("denied"),
+    ]);
+
+    expect(items.map((item) => item.chip)).toEqual(["open", "close", "take-profit", "risk", "cap", "adjust"]);
+  });
+
+  it("leaves the council's thinking to the AI tab, which has room for it", () => {
+    // A lane that scrolled "council says hold" past you every few seconds would
+    // train you to stop reading the half that matters.
+    expect(toNewsItems([action("analysis"), action("decision")])).toEqual([]);
+  });
+
+  it("keeps the order it was given, which is newest first", () => {
+    const items = toNewsItems([
+      action("close", { id: "newest", at: 3 }),
+      action("open", { id: "older", at: 2 }),
+      action("cap", { id: "oldest", at: 1 }),
+    ]);
+
+    expect(items.map((item) => item.key)).toEqual(["newest", "older", "oldest"]);
+  });
+
+  it("names the bot and the symbol together, and survives either being absent", () => {
+    expect(toNewsItems([action("open")])[0].who).toBe("Grid-ETH · ETH/USDT");
+    expect(toNewsItems([action("open", { symbol: null })])[0].who).toBe("Grid-ETH");
+    expect(toNewsItems([action("open", { botName: null, symbol: null })])[0].who).toBe("");
+  });
+
+  it("colours a gain up, an info line flat, and anything costly down", () => {
+    expect(toNewsItems([action("close", { severity: "success" })])[0].direction).toBe("up");
+    expect(toNewsItems([action("open", { severity: "info" })])[0].direction).toBe("flat");
+    expect(toNewsItems([action("risk", { severity: "warning" })])[0].direction).toBe("down");
+    expect(toNewsItems([action("risk", { severity: "danger" })])[0].direction).toBe("down");
+  });
+
+  it("marks an unattended action, which is the one worth catching on a passing glance", () => {
+    expect(toNewsItems([action("open", { autonomous: true })])[0].autonomous).toBe(true);
+  });
+
+  it("survives an empty or missing feed", () => {
+    expect(toNewsItems([])).toEqual([]);
+    expect(toNewsItems(undefined)).toEqual([]);
   });
 });

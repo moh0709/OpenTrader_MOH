@@ -2,6 +2,14 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["unicorn", "typescript", "oxc"],
   "categories": {},
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/.next/**",
+    "packages/prisma/src/zod/**",
+    "packages/prisma/src/client/**",
+    "app/frontend/**",
+    "app/dist/**"
+  ],
   "rules": {
     "for-direction": "warn",
     "no-async-promise-executor": "warn",

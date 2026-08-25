@@ -7,6 +7,49 @@
     <link rel="icon" href="/favicon.ico" />
     <title>OpenTrader Analytics</title>
     <link rel="stylesheet" href="./styles.css" />
+
+    <!--
+      The module graph, declared up front.
+
+      This dashboard ships as plain ES modules with no build step, which is what
+      makes editing it a matter of saving a file and reloading. The cost is
+      discovery: the browser cannot ask for `charts.js` until it has parsed
+      `overview.js`, which it cannot ask for until it has parsed `widgets/index.js`,
+      so a cold load walks the graph one level at a time.
+
+      These hints collapse that walk into a single parallel batch. Bundling would
+      do the same thing and take the no-build-step property with it, which is a
+      poor trade for a dashboard one operator opens.
+
+      A stale entry here is harmless — one unused request — but a missing one only
+      costs a little latency, so it is not worth being anxious about.
+    -->
+    <link rel="modulepreload" href="./lib/api.js" />
+    <link rel="modulepreload" href="./lib/store.js" />
+    <link rel="modulepreload" href="./lib/dom.js" />
+    <link rel="modulepreload" href="./lib/format.js" />
+    <link rel="modulepreload" href="./lib/poller.js" />
+    <link rel="modulepreload" href="./lib/layout.js" />
+    <link rel="modulepreload" href="./lib/board.js" />
+    <link rel="modulepreload" href="./lib/groups.js" />
+    <link rel="modulepreload" href="./lib/toast.js" />
+    <link rel="modulepreload" href="./lib/charts.js" />
+    <link rel="modulepreload" href="./lib/ticker.js" />
+    <link rel="modulepreload" href="./lib/ai-feed.js" />
+    <link rel="modulepreload" href="./lib/spotlight.js" />
+    <link rel="modulepreload" href="./lib/share.js" />
+    <link rel="modulepreload" href="./lib/command-palette.js" />
+    <link rel="modulepreload" href="./lib/ai-settings.js" />
+    <link rel="modulepreload" href="./widgets/index.js" />
+    <link rel="modulepreload" href="./widgets/overview.js" />
+    <link rel="modulepreload" href="./widgets/trades.js" />
+    <link rel="modulepreload" href="./widgets/market.js" />
+    <link rel="modulepreload" href="./widgets/ai.js" />
+    <link rel="modulepreload" href="./widgets/arbitrage.js" />
+    <link rel="modulepreload" href="./widgets/research.js" />
+    <link rel="modulepreload" href="./widgets/learning.js" />
+    <link rel="modulepreload" href="./widgets/analytics.js" />
+    <link rel="modulepreload" href="./widgets/ops.js" />
   </head>
   <body>
     <div id="app" class="app" hidden>
@@ -106,6 +149,21 @@
 
       <div class="banner" data-banner hidden></div>
 
+      <!-- Shown only while the AI may act without asking. Page furniture rather
+           than part of the chat widget on purpose: the one failure that matters
+           is coming back to a tab you left open and not knowing it is armed. -->
+      <div class="autopilot" data-autopilot hidden role="alert">
+        <span class="autopilot__dot" aria-hidden="true"></span>
+        <strong>Autopilot armed</strong>
+        <span class="autopilot__text">The AI is carrying out its own proposals. Every action appears in AI actions.</span>
+        <button type="button" class="btn btn--sm" data-autopilot-off>Disarm</button>
+      </div>
+
+      <!-- One board per tab. Only the active tab is built, so a tab you are not
+           looking at costs nothing to keep. Right-click a tab to rename or
+           remove it. -->
+      <nav class="tabs" data-tabs role="tablist" aria-label="Dashboard views"></nav>
+
       <main class="grid" data-grid aria-label="Dashboard widgets"></main>
 
       <p class="empty-state" data-empty hidden>
@@ -137,13 +195,28 @@
          removable, resizable or reorderable, and it shows on a shared feed
          where there are no widgets at all. -->
     <div class="ticker" data-ticker hidden>
-      <span class="ticker__tag">LIVE TRADES</span>
-      <button class="ticker__nav" type="button" data-ticker-prev aria-label="Previous trade" title="Previous trade">&#9664;</button>
-      <div class="ticker__view">
-        <div class="ticker__item" data-ticker-item></div>
+      <div class="ticker__lane" data-lane-trades>
+        <span class="ticker__tag">LIVE TRADES</span>
+        <button class="ticker__nav" type="button" data-lane-prev aria-label="Previous trade" title="Previous trade">&#9664;</button>
+        <div class="ticker__view">
+          <div class="ticker__item" data-lane-item></div>
+        </div>
+        <button class="ticker__nav" type="button" data-lane-next aria-label="Next trade" title="Next trade">&#9654;</button>
+        <span class="ticker__count" data-lane-count></span>
       </div>
-      <button class="ticker__nav" type="button" data-ticker-next aria-label="Next trade" title="Next trade">&#9654;</button>
-      <span class="ticker__count" data-ticker-count></span>
+
+      <!-- The right lane is the same bar for the AI: only what it did to
+           positions and capital, never what it merely thought. Hidden on a
+           shared feed, which has no access to the AI action stream. -->
+      <div class="ticker__lane ticker__lane--ai" data-lane-ai hidden>
+        <span class="ticker__tag ticker__tag--ai">AI NEWS</span>
+        <button class="ticker__nav" type="button" data-lane-prev aria-label="Previous AI action" title="Previous AI action">&#9664;</button>
+        <div class="ticker__view">
+          <div class="ticker__item" data-lane-item></div>
+        </div>
+        <button class="ticker__nav" type="button" data-lane-next aria-label="Next AI action" title="Next AI action">&#9654;</button>
+        <span class="ticker__count" data-lane-count></span>
+      </div>
     </div>
 
     <div class="toasts" data-toasts aria-live="polite" aria-atomic="false"></div>

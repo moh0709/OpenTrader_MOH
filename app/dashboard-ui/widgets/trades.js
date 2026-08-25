@@ -126,7 +126,15 @@ export const closedTradesWidget = {
             "tbody",
             {},
             trades.map((trade) =>
-              el("tr", { title: `Closed ${dateTime(trade.exitAt)}` }, [
+              // The two data attributes are how an AI action bubble finds this
+              // row. Attributes only: nothing here reads them.
+              el(
+                "tr",
+                {
+                  title: `Closed ${dateTime(trade.exitAt)}`,
+                  dataset: { tradeId: String(trade.smartTradeId), botId: String(trade.botId) },
+                },
+                [
                 el("td", { class: "table__name", text: botNames[trade.botId] ?? `Bot ${trade.botId}` }),
                 el("td", { text: trade.symbol }),
                 el("td", { text: price(trade.entryPrice) }),
@@ -136,7 +144,8 @@ export const closedTradesWidget = {
                 el("td", { class: pnlClass(trade.pnlPercent), text: percent(trade.pnlPercent) }),
                 el("td", { text: duration(trade.holdMs) }),
                 el("td", { class: "muted", text: timeAgo(trade.exitAt, now) }),
-              ]),
+                ],
+              ),
             ),
           ),
           el("tfoot", {}, [
@@ -248,7 +257,7 @@ export const openPositionsWidget = {
             "tbody",
             {},
             positions.map((position) =>
-              el("tr", {}, [
+              el("tr", { dataset: { tradeId: String(position.smartTradeId), botId: String(position.botId) } }, [
                 el("td", { class: "table__name", text: view.botNames[position.botId] ?? `Bot ${position.botId}` }),
                 el("td", { text: price(position.entryPrice) }),
                 el("td", { text: price(position.markPrice) }),

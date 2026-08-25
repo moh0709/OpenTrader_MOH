@@ -4,7 +4,15 @@ import { exchangeProvider, IExchange } from "@opentrader/exchanges";
 import { TradeExecutor } from "./trade.executor.js";
 import { createTrade, getExchangeAccount, updateEntryOrder } from "../../utils/test.js";
 
-describe("TradeExecutor", () => {
+/**
+ * Live integration test. Opt in with `OPENTRADER_INTEGRATION=1`.
+ *
+ * Same reasoning as the order executor suite beside it: this needs a seeded
+ * database and places real orders, so it cannot run unattended. It failed on
+ * every run before a single case executed, and a permanently red suite is one
+ * nobody reads.
+ */
+describe.runIf(process.env.OPENTRADER_INTEGRATION === "1")("TradeExecutor", () => {
   let exchangeAccount: ExchangeAccountWithCredentials;
 
   let smartTrade: SmartTradeWithOrders;

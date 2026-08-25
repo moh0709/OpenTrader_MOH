@@ -258,7 +258,9 @@ export const fleetWidget = {
       const controls = ctx.store.settings.controlsEnabled;
 
       const rows = bots.map((bot) =>
-        el("tr", {}, [
+        // `data-bot-id` is how the AI action bubbles find this row. Attribute
+        // only — nothing about the row's behaviour or appearance depends on it.
+        el("tr", { dataset: { botId: String(bot.botId) } }, [
           el("td", { class: "table__name" }, [
             el("div", {}, [
               el("span", { text: bot.name }),

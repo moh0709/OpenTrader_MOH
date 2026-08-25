@@ -1,3 +1,4 @@
+import { aiActivity } from "@opentrader/ai-team";
 import { StrategyRunner, type IBotControl } from "@opentrader/bot-processor";
 import type { IExchange } from "@opentrader/exchanges";
 import type { ICandlestick, MarketData, MarketId } from "@opentrader/types";
@@ -314,5 +315,62 @@ describe("hybrid strategy — StrategyRunner integration", () => {
     };
 
     await expect(runner.process({}, "onCandleClosed", marketData(risingCandles()), markets)).resolves.toBeUndefined();
+  });
+
+  /**
+   * What the dashboard's AI action feed is fed.
+   *
+   * The feed is only useful if it reads like news, so the flood-control claim is
+   * worth pinning down: a council that has been saying the same thing for hours
+   * must write one entry, not one per candle.
+   */
+  describe("AI action feed", () => {
+    beforeEach(() => aiActivity.clear());
+
+    it("records the order it placed, against the bot and symbol that placed it", async () => {
+      const runner = makeRunner(control);
+
+      await runner.process({}, "onCandleClosed", marketData(risingCandles()), marketsWithBooks());
+
+      const opened = aiActivity.since(0).find((entry) => entry.chip === "open");
+
+      expect(opened).toBeDefined();
+      expect(opened!.botId).toBe(botConfig.id);
+      expect(opened!.symbol).toBe(SYMBOL);
+      // The dashboard points at a row using this.
+      expect(opened!.target).toEqual({ botId: botConfig.id });
+    });
+
+    it("records the council's view when it changes", async () => {
+      const runner = makeRunner(control);
+
+      await runner.process({}, "onCandleClosed", marketData(risingCandles()), marketsWithBooks());
+
+      expect(aiActivity.since(0).some((entry) => entry.chip === "analysis")).toBe(true);
+    });
+
+    it("does not restate an unchanged council view on every candle", async () => {
+      const runner = makeRunner(control);
+      const state: Record<string, unknown> = {};
+
+      for (let tick = 0; tick < 5; tick += 1) {
+        await runner.process(state, "onCandleClosed", marketData(flatCandles()), marketsWithBooks());
+      }
+
+      const analyses = aiActivity.since(0).filter((entry) => entry.chip === "analysis");
+
+      expect(analyses).toHaveLength(1);
+    });
+
+    it("keeps every entry short enough to read in a bubble", async () => {
+      const runner = makeRunner(control);
+
+      await runner.process({}, "onCandleClosed", marketData(risingCandles()), marketsWithBooks());
+
+      for (const entry of aiActivity.since(0)) {
+        expect(entry.title.length).toBeLessThanOrEqual(48);
+        expect(entry.detail.length).toBeLessThanOrEqual(140);
+      }
+    });
   });
 });

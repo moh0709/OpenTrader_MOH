@@ -5,7 +5,20 @@ import { Order } from "@opentrader/db";
 import { OrderExecutor } from "./order.executor.js";
 import { createTrade, getExchangeAccount } from "../../utils/test.js";
 
-describe("OrderExecutor", () => {
+/**
+ * Live integration test. Opt in with `OPENTRADER_INTEGRATION=1`.
+ *
+ * This suite is not a unit test and cannot be run unattended: it needs a
+ * database holding a seeded exchange account, and it **places and cancels real
+ * orders** on whatever exchange that account points at.
+ *
+ * It used to fail on every run, in CI and locally, with a
+ * PrismaClientInitializationError before a single case executed — which meant a
+ * permanently red suite that everyone learned to ignore, and that is worse than
+ * no suite at all. Gating it turns that into a deliberate skip: green by
+ * default, and still here for anyone who sets the environment up.
+ */
+describe.runIf(process.env.OPENTRADER_INTEGRATION === "1")("OrderExecutor", () => {
   let exchangeAccount: ExchangeAccountWithCredentials;
 
   let smartTrade: SmartTradeWithOrders;
