@@ -408,3 +408,19 @@ model LearningJournal {
   @@index([botId, status])
   @@index([createdAt])
 }
+
+/// Operator-chosen LLM configuration for the AI council, set from the
+/// dashboard's AI settings panel. Singleton (id = 1). The key is stored here
+/// because this database already holds exchange credentials behind the same
+/// login; the dashboard never echoes it back, only a mask.
+model AiSettings {
+  id Int @id @default(1)
+
+  /// anthropic | openai | openrouter | gemini | ollama | opencode-zen | opencode-go | custom
+  provider String
+  model    String
+  apiKey   String?
+  baseUrl  String?
+
+  updatedAt DateTime @updatedAt
+}

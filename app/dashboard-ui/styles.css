@@ -1081,6 +1081,32 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
 }
 .lrn-actions { display: flex; gap: 6px; }
 
+/* ---------- AI settings panel ---------- */
+
+.ais-status { margin-bottom: 12px; font-size: 12px; }
+.ais-label {
+  display: block;
+  margin: 12px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ais-row { display: flex; gap: 8px; margin-top: 14px; }
+.ais-row .btn { flex: 1; }
+.ais-message {
+  min-height: 18px;
+  margin: 12px 0;
+  font-size: 12px;
+}
+.ais-message--error { color: var(--critical); }
+.ais-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.btn--ai {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--series-1) 35%, var(--border));
+}
+
 /* Tables read row by row; a hover band keeps your place. */
 .table tbody tr { transition: background var(--speed-fast) var(--ease); }
 .table tbody tr:hover { background: color-mix(in srgb, var(--series-1) 5%, transparent); }

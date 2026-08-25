@@ -20,6 +20,7 @@ import { retentionDays, xprisma } from "@opentrader/db";
 import { createServer, CreateServerOptions } from "./server.js";
 import { RegimeService } from "./regime/regime.service.js";
 import { startLearningLoop } from "./learning/learning.service.js";
+import { setRuntimeProvider } from "@opentrader/ai-team";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 
 type AppParams = {
@@ -49,6 +50,27 @@ export class App {
   ) {
     this.startLogPruning();
     this.regime.start();
+    // Restore the operator's saved AI settings before any strategy can tick,
+    // so the council comes up on the provider they chose rather than whatever
+    // the environment happens to carry.
+    void xprisma.aiSettings
+      .findUnique({ where: { id: 1 } })
+      .then((row) => {
+        if (!row) return;
+        if (row.provider === "none") {
+          setRuntimeProvider(null);
+          logger.info("[AI] Council disabled by saved settings");
+        } else {
+          setRuntimeProvider({
+            id: row.provider as never,
+            baseUrl: row.baseUrl ?? "",
+            model: row.model,
+            ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+          });
+          logger.info(`[AI] Council restored to ${row.provider}:${row.model}`);
+        }
+      })
+      .catch((err) => logger.warn(`[AI] Could not restore saved settings: ${err instanceof Error ? err.message : String(err)}`));
     // The learning sweep is advisory and off the trading path; it only ever
     // writes journal proposals, which a human applies.
     this.stopLearning = startLearningLoop(OWNER_ID);

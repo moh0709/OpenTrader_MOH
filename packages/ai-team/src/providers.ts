@@ -64,6 +64,25 @@ function firstEnv(env: NodeJS.ProcessEnv, names: string[]): string | undefined {
 }
 
 /**
+ * Operator override set from the dashboard. Three states matter:
+ *   undefined  — nothing chosen yet; fall through to the environment
+ *   null       — the operator explicitly disabled the LLM layer
+ *   config     — the operator's saved choice
+ */
+let runtimeOverride: ProviderConfig | null | undefined = undefined;
+
+/** Apply (or clear, with null) the dashboard's provider choice. Live at once. */
+export function setRuntimeProvider(config: ProviderConfig | null) {
+  runtimeOverride = config;
+}
+
+/** What the operator saved, if anything. Undefined means "not set". */
+export function getRuntimeProvider(): ProviderConfig | null | undefined {
+  return runtimeOverride;
+}
+
+
+/**
  * Resolve which provider to use.
  *
  * Priority:
@@ -75,6 +94,10 @@ function firstEnv(env: NodeJS.ProcessEnv, names: string[]): string | undefined {
  * "run deterministic-only".
  */
 export function resolveProvider(env: NodeJS.ProcessEnv = process.env): ProviderConfig | null {
+  // The dashboard's AI settings panel wins over the environment: it is the
+  // operator's most recent, most explicit choice and applies without a restart.
+  if (runtimeOverride !== undefined) return runtimeOverride ? { ...runtimeOverride } : null;
+
   const forced = env.AI_PROVIDER?.trim() as ProviderId | undefined;
   const genericKey = firstEnv(env, ["AI_API_KEY"]);
   const customBase = env.AI_BASE_URL?.trim();
@@ -190,20 +213,46 @@ export async function chatCompletion(provider: ProviderConfig, request: ChatRequ
 /** Cheap liveness probe: list models. Used by health checks, not trading. */
 export async function checkProvider(provider: ProviderConfig): Promise<boolean> {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4_000);
-
-    try {
-      const response = await fetch(`${provider.baseUrl}/models`, {
-        headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {},
-        signal: controller.signal,
-      });
-      return response.ok;
-    } finally {
-      clearTimeout(timer);
-    }
+    const models = await listModels(provider);
+    return models.length > 0;
   } catch {
     return false;
   }
 }
+
+/**
+ * Model ids offered by the provider. Anthropic's API differs in both auth
+ * header and payload shape, so it gets its own branch; everything else speaks
+ * the OpenAI wire format.
+ */
+export async function listModels(provider: ProviderConfig): Promise<string[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+
+  try {
+    let url = `${provider.baseUrl}/models`;
+    const headers: Record<string, string> = {};
+
+    if (provider.id === "anthropic") {
+      url = `${provider.baseUrl}/v1/models`;
+      if (!provider.apiKey) return [];
+      headers["x-api-key"] = provider.apiKey;
+      headers["anthropic-version"] = "2023-06-01";
+    } else if (provider.apiKey) {
+      headers.authorization = `Bearer ${provider.apiKey}`;
+    }
+
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok) return [];
+
+    const json = (await response.json()) as { data?: { id?: string }[]; models?: { id?: string }[] };
+    const rows = json.data ?? json.models ?? [];
+    return rows.map((m) => m.id).filter((id): id is string => Boolean(id)).sort();
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 

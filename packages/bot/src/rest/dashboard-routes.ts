@@ -26,6 +26,7 @@ import {
   revokeShare,
 } from "../processing/share/share.service.js";
 import { applyRegimeGovernor, requestResearchRun } from "@opentrader/regime";
+import { listModels, setRuntimeProvider, type ProviderConfig, type ProviderId } from "@opentrader/ai-team";
 import { applyLearning, dismissLearning, evaluateLearning, revertLearning } from "../learning/learning.service.js";
 import { disarmRegime, syncRegime } from "../regime/regime.service.js";
 import { logger } from "@opentrader/logger";
@@ -189,6 +190,10 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/actions/learning.apply", body: { id: "number" }, scope: "control", description: "Apply a journal proposal to the bot's settings. Values are clamped into guardrails; the previous settings are snapshotted for revert." },
       { path: "POST /api/dash/actions/learning.revert", body: { id: "number" }, scope: "control", description: "Restore the bot's settings to the snapshot taken when a proposal was applied." },
       { path: "POST /api/dash/actions/learning.dismiss", body: { id: "number" }, scope: "control", description: "Dismiss a proposal without applying it." },
+      { path: "GET /api/dash/ai-settings", params: {}, description: "The saved LLM configuration (key masked) for the AI council." },
+      { path: "POST /api/dash/actions/ai-settings.save", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Save and instantly apply the AI council's provider/model. provider 'none' disables it." },
+      { path: "POST /api/dash/actions/ai-models", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Fetch the model ids a provider offers, for the settings picker." },
+      { path: "POST /api/dash/actions/ai-settings.test", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Verify a provider configuration by listing its models." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -701,6 +706,101 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     };
   });
 
+  // ---------- AI settings ----------
+  //
+  // The operator's LLM choice, set from the dashboard and persisted so it
+  // survives restarts. Saving applies live via the runtime override — no
+  // restart. The key is never echoed back, only a mask.
+
+  const AI_PROVIDER_IDS = ["anthropic", "openai", "openrouter", "gemini", "ollama", "opencode-zen", "opencode-go", "custom"];
+
+  type AiSettingsRow = { provider: string; model: string; apiKey: string | null; baseUrl: string | null };
+
+  const loadAiSettings = async (): Promise<AiSettingsRow | null> =>
+    (await xprisma.aiSettings.findUnique({ where: { id: 1 } })) as AiSettingsRow | null;
+
+  /** Push a saved row into the council immediately. */
+  function applyAiSettings(row: AiSettingsRow | null) {
+    if (!row || row.provider === "none") {
+      setRuntimeProvider(null);
+      return;
+    }
+
+    setRuntimeProvider({
+      id: row.provider as ProviderId,
+      baseUrl: row.baseUrl ?? "",
+      model: row.model,
+      ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+    });
+  }
+
+  const maskKey = (key: string | null | undefined) =>
+    key ? `${key.slice(0, 6)}…${key.slice(-4)} (${key.length} chars)` : null;
+
+  fastify.get("/ai-settings", async () => {
+    const row = await loadAiSettings();
+
+    return {
+      saved: row
+        ? {
+            provider: row.provider,
+            model: row.model,
+            baseUrl: row.baseUrl ?? null,
+            hasKey: Boolean(row.apiKey),
+            keyMasked: maskKey(row.apiKey),
+          }
+        : null,
+    };
+  });
+
+  function defaultBaseUrlFor(providerId: string): string {
+    const defaults: Record<string, string> = {
+      anthropic: "https://api.anthropic.com",
+      openai: "https://api.openai.com/v1",
+      openrouter: "https://openrouter.ai/api/v1",
+      gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
+      ollama: "http://127.0.0.1:11434/v1",
+      "opencode-zen": "https://opencode.ai/zen/v1",
+      "opencode-go": "https://opencode.ai/go/v1",
+    };
+    return defaults[providerId] ?? "";
+  }
+
+  /**
+   * List models for a provider. The key may arrive blank when the operator
+   * already has a stored one and did not retype it; fall back to storage.
+   */
+  fastify.post("/actions/ai-models", async (request: AuthedRequest, reply) => {
+    const permission = agentAccess.canControl(request.actor!);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const body = ((request.body ?? {}) as Record<string, unknown>) || {};
+    const providerId = str(body.provider);
+    if (!providerId || !AI_PROVIDER_IDS.includes(providerId)) {
+      return reply.code(400).send({ error: "bad_request", message: "unknown provider" });
+    }
+
+    const row = await loadAiSettings();
+    const apiKey = (str(body.apiKey) || (row && row.provider === providerId ? row.apiKey : "")) ?? "";
+    const baseUrl =
+      str(body.baseUrl) || (row && row.provider === providerId ? row.baseUrl : "") || defaultBaseUrlFor(providerId);
+
+    if (providerId !== "ollama" && !apiKey) {
+      return reply.code(400).send({ error: "bad_request", message: `an API key for ${providerId} is required` });
+    }
+
+    const models = await listModels({ id: providerId as ProviderId, model: "", baseUrl, ...(apiKey ? { apiKey } : {}) });
+    if (models.length === 0) {
+      return reply.code(502).send({
+        error: "unavailable",
+        message: `The ${providerId} endpoint returned no models. Check the API key and base URL.`,
+      });
+    }
+
+    return { ok: true, models };
+  });
+
+
   /**
    * Conviction history, oldest first, so the dashboard can draw the council
    * changing its mind rather than only repeating its latest word.
@@ -948,5 +1048,95 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     } catch (error) {
       return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  /** Verify a configuration end-to-end by listing its models. */
+  fastify.post("/actions/ai-settings.test", async (request: AuthedRequest, reply) => {
+    const permission = agentAccess.canControl(request.actor!);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const body = ((request.body ?? {}) as Record<string, unknown>) || {};
+    const providerId = str(body.provider);
+    if (!providerId || !AI_PROVIDER_IDS.includes(providerId)) {
+      return reply.code(400).send({ error: "bad_request", message: "unknown provider" });
+    }
+
+    const row = await loadAiSettings();
+    const apiKey = (str(body.apiKey) || (row && row.provider === providerId ? row.apiKey : "")) ?? "";
+    const baseUrl =
+      str(body.baseUrl) || (row && row.provider === providerId ? row.baseUrl : "") || defaultBaseUrlFor(providerId);
+
+    if (providerId !== "ollama" && !apiKey) {
+      return reply.code(400).send({ error: "bad_request", message: `an API key for ${providerId} is required` });
+    }
+
+    try {
+      const models = await listModels({ id: providerId as ProviderId, model: "", baseUrl, ...(apiKey ? { apiKey } : {}) });
+      return { ok: models.length > 0, count: models.length };
+    } catch {
+      return { ok: false, count: 0 };
+    }
+  });
+
+  /** Save the operator's choice; it becomes live immediately, no restart. */
+  fastify.post("/actions/ai-settings.save", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const body = ((request.body ?? {}) as Record<string, unknown>) || {};
+    const providerId = str(body.provider);
+
+    // Disabling the AI layer is a legitimate save.
+    if (providerId === "none") {
+      await xprisma.aiSettings.upsert({
+        where: { id: 1 },
+        create: { id: 1, provider: "none", model: "" },
+        update: { provider: "none", model: "", apiKey: null, baseUrl: null },
+      });
+      applyAiSettings(null);
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai-settings.save", target: { provider: "none" }, outcome: "allowed", detail: null });
+      logger.info(`[Dashboard] ${actor.kind} "${actor.name}" disabled the AI council`);
+
+      return { ok: true, enabled: false };
+    }
+
+    if (!providerId || !AI_PROVIDER_IDS.includes(providerId)) {
+      return reply.code(400).send({ error: "bad_request", message: "unknown provider" });
+    }
+
+    const model = str(body.model);
+    if (!model) return reply.code(400).send({ error: "bad_request", message: "model is required" });
+
+    const row = await loadAiSettings();
+    const apiKey = str(body.apiKey) || (row && row.provider === providerId ? row.apiKey : "") || "";
+    const needsKey = providerId !== "ollama";
+    if (!apiKey && needsKey) {
+      return reply.code(400).send({ error: "bad_request", message: `an API key for ${providerId} is required` });
+    }
+
+    const baseUrl =
+      str(body.baseUrl) || (row && row.provider === providerId ? row.baseUrl : "") || defaultBaseUrlFor(providerId);
+
+    const saved = (await xprisma.aiSettings.upsert({
+      where: { id: 1 },
+      create: { id: 1, provider: providerId, model, apiKey: apiKey || null, baseUrl },
+      update: { provider: providerId, model, apiKey: apiKey || null, baseUrl },
+    })) as AiSettingsRow;
+
+    applyAiSettings(saved);
+    dashboardService.invalidate();
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "ai-settings.save",
+      target: { provider: providerId, model },
+      outcome: "allowed",
+      detail: null,
+    });
+    logger.info(`[Dashboard] ${actor.kind} "${actor.name}" set the AI council to ${providerId}:${model}`);
+
+    return { ok: true, enabled: true, provider: providerId, model };
   });
 }

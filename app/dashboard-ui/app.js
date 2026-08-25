@@ -25,6 +25,7 @@ import { el, mount } from "./lib/dom.js";
 import { money, timeAgo } from "./lib/format.js";
 import { fetchWatchers, renderShareManager, shareToken, startLiveFeed } from "./lib/share.js";
 import { openCommandPalette } from "./lib/command-palette.js";
+import { renderAiSettings } from "./lib/ai-settings.js";
 import { markRising, mountTicker, toTickerItems } from "./lib/ticker.js";
 import { query } from "./lib/api.js";
 
@@ -129,8 +130,15 @@ function bindChrome() {
       closeDrawer("catalog");
       closeDrawer("settings");
       closeDrawer("share");
+      closeDrawer("ai-settings");
     }
   });
+
+  for (const node of document.querySelectorAll("[data-ai-close]")) {
+    node.addEventListener("click", () => closeDrawer("ai-settings"));
+  }
+
+  document.querySelector("[data-open-ai-settings]").addEventListener("click", () => openDrawer("ai-settings"));
 
   // The palette is the keyboard way into everything on this page. Ctrl+K /
   // Cmd+K opens it; the topbar button is there so it can be discovered.
@@ -201,6 +209,7 @@ function openDrawer(which) {
   if (which === "catalog") renderCatalog();
   if (which === "settings") renderSettings();
   if (which === "share") renderShareManager(document.querySelector("[data-share-body]"));
+  if (which === "ai-settings") void renderAiSettings(document.querySelector("[data-ai-body]"));
   node.hidden = false;
 }
 
