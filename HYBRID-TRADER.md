@@ -168,7 +168,27 @@ HYBRID_LIVE=1 HYBRID_SYMBOL=ETH/USDT HYBRID_BAR=4h HYBRID_CANDLES=500 \
 
 ### Enabling the LLM strategist
 
-Set `ANTHROPIC_API_KEY` (or run `ant auth login` and set `HYBRID_LLM=1`).
+Set `ANTHROPIC_API_KEY` (or run `ant auth login` and set `HYBRID_LLM=1`). Or point
+the council at any other backend — OpenAI, OpenRouter, Google Gemini, a local
+Ollama, or an OpenCode gateway. All non-Anthropic backends speak the OpenAI wire
+format and are reached through one adapter.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AI_PROVIDER` | auto | `anthropic` `openai` `openrouter` `gemini` `ollama` `opencode-zen` `opencode-go` `custom` |
+| `AI_MODEL` | per provider | Model id, e.g. `qwen3:14b`, `gpt-5`, `gemini-2.5-pro` |
+| `AI_API_KEY` | – | Generic key; provider-specific keys below also work |
+| `AI_BASE_URL` | per provider | Override the endpoint (required for `custom`) |
+
+Provider-specific keys recognised by auto-detection: `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` / `GOOGLE_API_KEY`,
+`OPENCODE_ZEN_API_KEY`, `OPENCODE_GO_API_KEY`. Ollama needs no key; set
+`OLLAMA_BASE_URL` (e.g. `http://127.0.0.1:11434/v1`) to use it.
+
+Auto-detection picks the first configured provider; an explicit `AI_PROVIDER`
+always wins. With nothing configured the council runs deterministic-only.
+
+Anthropic-specific tuning:
 
 | Variable | Default | Purpose |
 |---|---|---|

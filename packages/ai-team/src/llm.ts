@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "@opentrader/logger";
 import { atrPercent, closes, rsi, slopePercent, sma } from "./indicators.js";
+import { chatCompletion, resolveProvider } from "./providers.js";
 import { clampConfidence, type AgentOpinion, type MarketSnapshot, type Signal } from "./types.js";
 
 export type LlmEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -180,6 +181,42 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
     };
   }
 
+  // A configured non-Anthropic backend takes the OpenAI-compatible path.
+  // Anthropic keeps its native SDK below.
+  const provider = resolveProvider();
+  if (provider && provider.id !== "anthropic") {
+    logger.info(`[ai-team] Strategist using ${provider.id} (${provider.model})`);
+    return async function llmAnalystOpenAi(snapshot: MarketSnapshot): Promise<AgentOpinion | null> {
+      const text = await chatCompletion(provider, {
+        system: SYSTEM_PROMPT,
+        user: buildSnapshotPrompt(snapshot),
+        maxTokens: config.maxTokens,
+        timeoutMs: config.timeoutMs,
+        json: true,
+      });
+
+      if (!text) {
+        logger.warn("[ai-team] LLM call failed; using deterministic council");
+        return null;
+      }
+
+      const parsed = parseOpinion(text);
+      if (!parsed) {
+        logger.warn("[ai-team] LLM output failed validation; using deterministic council");
+        return null;
+      }
+
+      return {
+        agent: "llm-strategist",
+        signal: parsed.signal,
+        confidence: clampConfidence(parsed.confidence),
+        rationale: parsed.rationale,
+        source: "llm",
+        evidence: { regime: parsed.regime, model: `${provider.id}:${provider.model}`, effort: config.effort },
+      };
+    };
+  }
+
   // Resolves credentials from the environment or an `ant auth login` profile.
   const client = new Anthropic({ maxRetries: config.maxRetries });
 
@@ -262,9 +299,36 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
 export function createReflector(config: LlmConfig = llmConfigFromEnv()) {
   if (!config.enabled) return null;
 
+  const REFLECTOR_PROMPT = `You are the risk post-mortem writer on an automated trading desk.
+
+A bot has just closed its Nth losing trade in a row. You receive the deterministic
+record: each recent trade's entry/exit and profit, plus a one-line market summary.
+Write a tight post-mortem for the human operator:
+
+- What pattern connects the losses (same direction into one move? exits too tight
+  for the volatility? entries stretched against trend?)
+- What to watch next before trusting this bot again
+
+Rules:
+- At most 150 words, plain prose, no headings.
+- Reference the actual numbers given to you; do not invent prices or dates.
+- Do not recommend specific parameter values — the desk computes those.`;
+
+  const provider = resolveProvider();
+  if (provider && provider.id !== "anthropic") {
+    return async function reflectOpenAi(prompt: string): Promise<string | null> {
+      return chatCompletion(provider, {
+        system: REFLECTOR_PROMPT,
+        user: prompt,
+        maxTokens: 1_000,
+        timeoutMs: config.timeoutMs,
+      });
+    };
+  }
+
   const client = new Anthropic({ maxRetries: config.maxRetries });
 
-  const REFLECTOR_PROMPT = `You are the risk post-mortem writer on an automated trading desk.
+  const REFLECTOR_PROMPT_TEXT = `You are the risk post-mortem writer on an automated trading desk.
 
 A bot has just closed its Nth losing trade in a row. You receive the deterministic
 record: each recent trade's entry/exit and profit, plus a one-line market summary.
@@ -285,7 +349,7 @@ Rules:
         {
           model: config.model,
           max_tokens: 1_000,
-          system: REFLECTOR_PROMPT,
+          system: REFLECTOR_PROMPT_TEXT,
           messages: [{ role: "user", content: prompt }],
         },
         { timeout: config.timeoutMs },
