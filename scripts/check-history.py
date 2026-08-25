@@ -15,25 +15,15 @@ def trpc(name, body=None):
         )
     return json.loads(urllib.request.urlopen(req).read().decode())
 
-def call(path, body=None):
-    data = json.dumps(body or {}).encode() if body is not None else None
-    req = urllib.request.Request(f"http://[::1]:8000{path}", headers={"Authorization": pw, "Content-Type": "application/json"}, data=data)
-    return urllib.request.urlopen(req).read().decode()
-
-bots = trpc("bot.list").get("result", {}).get("data", {}).get("json", [])
-for b in bots:
-    print(b.get("id"), b.get("name"), b.get("symbol"), "enabled=" + str(b.get("enabled")))
-
 import sys
 for bot_id in sys.argv[1:]:
-    try:
-        trpc("bot.start", {"botId": int(bot_id)})
-        print(f"started {bot_id}")
-    except Exception as e:
-        print(f"start {bot_id} failed: {e}")
+    trpc("bot.start", {"botId": int(bot_id)})
+    print(f"started {bot_id}")
 
 bots = trpc("bot.list").get("result", {}).get("data", {}).get("json", [])
-print("--- after ---")
 for b in bots:
-    print(b.get("id"), b.get("name"), "enabled=" + str(b.get("enabled")))
+    if b.get("enabled"):
+        print("RUNNING:", b.get("id"), b.get("name"), b.get("symbol"))
+
+
 
