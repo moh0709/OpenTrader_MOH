@@ -54,6 +54,9 @@
       "path": "../regime"
     },
     {
+      "path": "../ai-team"
+    },
+    {
       "path": "../trpc"
     },
     {

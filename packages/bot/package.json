@@ -20,6 +20,8 @@
   "dependencies": {
     "@fastify/cors": "^10.0.2",
     "@fastify/static": "^8.0.3",
+    "@opentrader/arbitrage": "workspace:*",
+    "@opentrader/ai-team": "workspace:*",
     "@opentrader/bot-processor": "workspace:*",
     "@opentrader/bot-templates": "workspace:*",
     "@opentrader/db": "workspace:*",

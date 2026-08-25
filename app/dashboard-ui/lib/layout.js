@@ -78,7 +78,7 @@ export const PRESETS = {
   ops: ["kpi", "health", "events", "botLogs", "fleet"],
   // The AI desk: what the council thinks, what it is doing about it, and the
   // argument it had on the way there - one keystroke from the palette.
-  mission: ["kpi", "convictionBoard", "regimeImpact", "researchRoom", "researchLog"],
+  mission: ["kpi", "convictionBoard", "regimeImpact", "learningJournal", "researchRoom", "researchLog"],
 };
 
 export function preset(name) {

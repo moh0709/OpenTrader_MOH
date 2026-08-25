@@ -6,6 +6,7 @@ import { analyticsWidgets } from "./analytics.js";
 import { opsWidgets } from "./ops.js";
 import { arbitrageWidgets } from "./arbitrage.js";
 import { researchWidgets } from "./research.js";
+import { learningJournalWidget } from "./learning.js";
 
 const WIDGETS = [
   ...overviewWidgets,
@@ -13,6 +14,7 @@ const WIDGETS = [
   ...marketWidgets,
   ...arbitrageWidgets,
   ...researchWidgets,
+  learningJournalWidget,
   ...analyticsWidgets,
   ...opsWidgets,
 ];

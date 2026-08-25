@@ -248,3 +248,57 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
     }
   };
 }
+
+/**
+ * The post-mortem writer.
+ *
+ * Given a plain-language prompt (loss streak, the numbers, the market context),
+ * returns a short narrative analysis — or null on any failure, exactly like the
+ * strategist above. It never proposes parameter values itself: proposals are
+ * computed deterministically from the loss record and clamped into guardrails
+ * at apply time, so the model explains and suggests direction but cannot set
+ * numbers that reach the bot.
+ */
+export function createReflector(config: LlmConfig = llmConfigFromEnv()) {
+  if (!config.enabled) return null;
+
+  const client = new Anthropic({ maxRetries: config.maxRetries });
+
+  const REFLECTOR_PROMPT = `You are the risk post-mortem writer on an automated trading desk.
+
+A bot has just closed its Nth losing trade in a row. You receive the deterministic
+record: each recent trade's entry/exit and profit, plus a one-line market summary.
+Write a tight post-mortem for the human operator:
+
+- What pattern connects the losses (same direction into one move? exits too tight
+  for the volatility? entries stretched against trend?)
+- What to watch next before trusting this bot again
+
+Rules:
+- At most 150 words, plain prose, no headings.
+- Reference the actual numbers given to you; do not invent prices or dates.
+- Do not recommend specific parameter values — the desk computes those.`;
+
+  return async function reflect(prompt: string): Promise<string | null> {
+    try {
+      const response = await client.messages.create(
+        {
+          model: config.model,
+          max_tokens: 1_000,
+          system: REFLECTOR_PROMPT,
+          messages: [{ role: "user", content: prompt }],
+        },
+        { timeout: config.timeoutMs },
+      );
+
+      if (response.stop_reason === "refusal") return null;
+
+      const textBlock = response.content.find((block): block is Anthropic.TextBlock => block.type === "text");
+      return textBlock?.text ?? null;
+    } catch (error) {
+      logger.warn(`[ai-team] Reflector failed (${String(error)}); using heuristic analysis`);
+      return null;
+    }
+  };
+}
+

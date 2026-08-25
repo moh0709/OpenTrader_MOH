@@ -19,6 +19,7 @@ import { logger } from "@opentrader/logger";
 import { retentionDays, xprisma } from "@opentrader/db";
 import { createServer, CreateServerOptions } from "./server.js";
 import { RegimeService } from "./regime/regime.service.js";
+import { startLearningLoop } from "./learning/learning.service.js";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 
 type AppParams = {
@@ -27,6 +28,9 @@ type AppParams = {
 
 /** How often bot logs are pruned. Slow: the window is measured in days. */
 const LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** The dashboard runs as the single local user, matching the tRPC context. */
+const OWNER_ID = 1;
 
 export class App {
   /**
@@ -37,6 +41,7 @@ export class App {
    */
   private logPruneTimer: NodeJS.Timeout | null = null;
   private regime = new RegimeService();
+  private stopLearning: (() => void) | null = null;
 
   constructor(
     private platform: Platform,
@@ -44,6 +49,9 @@ export class App {
   ) {
     this.startLogPruning();
     this.regime.start();
+    // The learning sweep is advisory and off the trading path; it only ever
+    // writes journal proposals, which a human applies.
+    this.stopLearning = startLearningLoop(OWNER_ID);
   }
 
   /**
@@ -114,6 +122,10 @@ export class App {
     }
 
     this.regime.stop();
+    if (this.stopLearning) {
+      this.stopLearning();
+      this.stopLearning = null;
+    }
 
     await this.server.close();
     logger.info("Fastify Server has shut down gracefully.");

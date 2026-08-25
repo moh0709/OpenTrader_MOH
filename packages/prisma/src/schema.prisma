@@ -364,3 +364,47 @@ model RegimeConviction {
   /// The poller asks one question — latest per symbol — on a table that only grows.
   @@index([symbol, asOf])
 }
+
+/// One self-improvement cycle: the bot lost N trades in a row, something wrote
+/// down why, and a bounded adjustment was proposed.
+///
+/// Nothing here is applied automatically. `status` moves proposed → applied →
+/// (optionally) reverted, or proposed → dismissed, and every transition is
+/// operator-initiated from the dashboard. The proposal is stored alongside the
+/// settings snapshot it replaced, so a revert restores exactly what was there.
+model LearningJournal {
+  id Int @id @default(autoincrement())
+
+  botId   Int
+  botName String
+  symbol  String
+
+  /// Why this entry exists, e.g. `loss_streak`.
+  trigger    String
+  lossStreak Int
+
+  /// The deterministic numbers the analysis was based on — win/loss amounts,
+  /// average loss, sample size — as a JSON string. Kept even when an LLM wrote
+  /// the narrative, so the reasoning is checkable against the arithmetic.
+  stats String
+
+  /// The post-mortem narrative.
+  analysis String
+
+  /// Proposed setting changes, JSON stringified: `{ key: newValue }`. Keys are
+  /// checked against a whitelist and values clamped into bounds at apply time.
+  proposal String
+
+  /// proposed | applied | reverted | dismissed
+  status String @default("proposed")
+
+  /// Model that wrote the analysis, when one did. Null means heuristic only.
+  model String?
+
+  createdAt DateTime @default(now())
+  resolvedAt DateTime?
+
+  /// One open proposal per bot; resolved entries keep history by recency.
+  @@index([botId, status])
+  @@index([createdAt])
+}

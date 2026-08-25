@@ -26,6 +26,7 @@ import {
   revokeShare,
 } from "../processing/share/share.service.js";
 import { applyRegimeGovernor, requestResearchRun } from "@opentrader/regime";
+import { applyLearning, dismissLearning, evaluateLearning, revertLearning } from "../learning/learning.service.js";
 import { disarmRegime, syncRegime } from "../regime/regime.service.js";
 import { logger } from "@opentrader/logger";
 import type { Actor, AgentActionRecord, BotLogRow, BucketSize, DashboardEvent, LeaderboardMetric } from "@opentrader/trpc";
@@ -73,6 +74,30 @@ type RegimeConvictionRow = {
   model: string | null;
   costUsd: number | null;
 };
+
+type LearningRow = {
+  id: number;
+  botId: number;
+  botName: string;
+  symbol: string;
+  trigger: string;
+  lossStreak: number;
+  stats: string;
+  analysis: string;
+  proposal: string;
+  status: string;
+  model: string | null;
+  createdAt: Date;
+};
+
+/** JSON.parse that yields {} instead of throwing on a malformed stored blob. */
+function safeParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
 
 type AuthedRequest = FastifyRequest & { actor?: Actor };
 
@@ -159,6 +184,11 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/actions/regime.disarm", body: {}, scope: "control", description: "Disarm the governor and restore every managed bot to its baseline cap immediately." },
       { path: "POST /api/dash/actions/regime.sync", body: {}, scope: "control", description: "Reconcile caps against the latest convictions now, without waiting for the poll." },
       { path: "POST /api/dash/actions/regime.runNow", body: { symbols: "string[], optional" }, scope: "control", description: "Ask the research council to run now, out of schedule." },
+      { path: "GET /api/dash/learning", params: { limit: "1-100", status: "proposed|applied|reverted|dismissed" }, description: "The learning journal: loss-streak post-mortems and their adjustment proposals." },
+      { path: "POST /api/dash/actions/learning.evaluate", body: {}, scope: "control", description: "Run the loss-streak sweep now instead of waiting for the timer." },
+      { path: "POST /api/dash/actions/learning.apply", body: { id: "number" }, scope: "control", description: "Apply a journal proposal to the bot's settings. Values are clamped into guardrails; the previous settings are snapshotted for revert." },
+      { path: "POST /api/dash/actions/learning.revert", body: { id: "number" }, scope: "control", description: "Restore the bot's settings to the snapshot taken when a proposal was applied." },
+      { path: "POST /api/dash/actions/learning.dismiss", body: { id: "number" }, scope: "control", description: "Dismiss a proposal without applying it." },
       { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
     ],
   }));
@@ -650,6 +680,27 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     return { convictions: Object.values(convictions), bots: managed };
   });
 
+  /** The learning journal, newest first, optionally filtered by status. */
+  fastify.get("/learning", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const limit = Math.min(Math.max(num(query.limit) ?? 30, 1), 100);
+    const status = str(query.status);
+
+    const entries = (await xprisma.learningJournal.findMany({
+      where: status ? { status } : undefined,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    })) as LearningRow[];
+
+    return {
+      entries: entries.map((entry) => ({
+        ...entry,
+        stats: safeParse(entry.stats),
+        proposal: safeParse(entry.proposal),
+      })),
+    };
+  });
+
   /**
    * Conviction history, oldest first, so the dashboard can draw the council
    * changing its mind rather than only repeating its latest word.
@@ -823,5 +874,79 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (!ok) return reply.code(503).send({ error: "unavailable", message: "The research service did not accept the run." });
 
     return { ok: true, queued: true };
+  });
+
+  /** Run the loss-streak sweep now instead of waiting for the timer. */
+  fastify.post("/actions/learning.evaluate", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const result = await evaluateLearning(OWNER_ID);
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.evaluate", target: {}, outcome: "allowed", detail: null });
+
+    return { ok: true, ...result };
+  });
+
+  /** Apply a proposal: clamp into guardrails, snapshot previous settings first. */
+  fastify.post("/actions/learning.apply", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const id = num(((request.body ?? {}) as Record<string, unknown>).id);
+    if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
+
+    try {
+      const result = await applyLearning(id, OWNER_ID);
+      dashboardService.invalidate();
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.apply", target: { id }, outcome: "allowed", detail: null });
+      logger.info(`[Dashboard] ${actor.kind} "${actor.name}" applied learning entry ${id}`);
+
+      return { ok: true, ...result };
+    } catch (error) {
+      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  fastify.post("/actions/learning.revert", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const id = num(((request.body ?? {}) as Record<string, unknown>).id);
+    if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
+
+    try {
+      await revertLearning(id, OWNER_ID);
+      dashboardService.invalidate();
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.revert", target: { id }, outcome: "allowed", detail: null });
+
+      return { ok: true, id };
+    } catch (error) {
+      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  fastify.post("/actions/learning.dismiss", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const id = num(((request.body ?? {}) as Record<string, unknown>).id);
+    if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
+
+    try {
+      await dismissLearning(id);
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.dismiss", target: { id }, outcome: "allowed", detail: null });
+
+      return { ok: true, id };
+    } catch (error) {
+      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+    }
   });
 }

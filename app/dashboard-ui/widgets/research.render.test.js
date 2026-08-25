@@ -99,6 +99,24 @@ const FIXTURES = {
       ],
     },
   },
+  "learning?limit=30": {
+    entries: [
+      {
+        id: 7,
+        botId: 21,
+        botName: "Olive Darth Vader",
+        symbol: "BTC/USDT",
+        trigger: "loss_streak",
+        lossStreak: 3,
+        stats: { sampleSize: 12 },
+        analysis: "Three longs sold into falling prices; entries chased dips that kept dipping.",
+        proposal: { minConfidence: 0.65 },
+        status: "proposed",
+        model: "claude",
+        createdAt: NOW - 60_000,
+      },
+    ],
+  },
   "regime/runs?limit=40": {
     runs: [
       {
@@ -194,6 +212,17 @@ describe("Research widgets reach the container", () => {
     expect(rendered.some((t) => t.includes("History"))).toBe(true);
     expect(rendered.some((t) => t.includes("3 readings"))).toBe(true);
     expect(rendered.some((t) => t.includes("Transcript →"))).toBe(true);
+  });
+
+  it("renders the learning journal with its decision buttons", async () => {
+    const { learningJournalWidget } = await import("./learning.js");
+
+    const rendered = await renderWidget(learningJournalWidget);
+
+    expect(rendered.some((t) => t.includes("Olive Darth Vader"))).toBe(true);
+    expect(rendered.some((t) => t.includes("3 losses in a row"))).toBe(true);
+    expect(rendered.some((t) => t.includes("minConfidence → 0.65"))).toBe(true);
+    expect(rendered.some((t) => t.includes("Apply"))).toBe(true);
   });
 
   it("shows both sides of the debate in the Research Room split view", async () => {

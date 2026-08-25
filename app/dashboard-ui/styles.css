@@ -1069,6 +1069,18 @@ body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
 .cv-strip__block--bear { background: var(--critical); }
 .cv-strip__block--neutral { background: var(--baseline); }
 
+/* ---------- Learning journal ---------- */
+
+.lrn-proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; }
+.lrn-chip {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--series-1) 35%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--series-1) 7%, transparent);
+  font-size: 11px;
+}
+.lrn-actions { display: flex; gap: 6px; }
+
 /* Tables read row by row; a hover band keeps your place. */
 .table tbody tr { transition: background var(--speed-fast) var(--ease); }
 .table tbody tr:hover { background: color-mix(in srgb, var(--series-1) 5%, transparent); }
