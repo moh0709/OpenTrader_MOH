@@ -47,6 +47,15 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # The daemon is deployed as `app/dist/daemon.mjs`, so a green typecheck over
+      # source proves less than it looks. This step exists because a production
+      # deploy once installed cleanly and then failed here: pnpm 10 had skipped
+      # @moonrepo/cli's postinstall, so the `moon` binary the build shells out to
+      # was never downloaded. `onlyBuiltDependencies` in pnpm-workspace.yaml fixes
+      # the cause; this catches the next one of its kind.
+      - name: Build
+        run: pnpm build
+
       # The two live integration suites stay skipped: they need a seeded
       # database and place real orders. Set OPENTRADER_INTEGRATION=1 to run them
       # somewhere that is safe to trade from.

@@ -2,3 +2,22 @@ packages:
   - "app"
   - "packages/*"
   - "pro/*"
+
+# Dependencies allowed to run install scripts.
+#
+# pnpm 10 blocks postinstall scripts by default, which is the right default — but
+# these three do real work in theirs, and silently skipping it breaks the build in
+# a way that only shows up later and does not look like an install problem:
+#
+#   @moonrepo/cli  downloads the `moon` binary the launcher shells out to. Without
+#                  it `pnpm build` dies with `spawnSync ... moon ENOENT`, long after
+#                  a clean and apparently successful install.
+#   esbuild        downloads its platform binary; tsup cannot bundle without it.
+#   ccxt           postinstall step for the exchange bindings.
+#
+# Found the hard way on a production deploy: a from-scratch install succeeded and
+# the build then failed with a missing binary.
+onlyBuiltDependencies:
+  - "@moonrepo/cli"
+  - esbuild
+  - ccxt
