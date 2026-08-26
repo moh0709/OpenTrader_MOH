@@ -86,6 +86,47 @@ pnpm --filter @opentrader/prisma exec prisma db push
 
 # 4. Restart the daemon by whatever supervises it
 systemctl restart opentrader     # or your equivalent
+
+# 5. RESTART THE BOTS. Read the section below before skipping this.
+```
+
+### Restarting the daemon disables your bots
+
+This is the single most important thing on this page, and it is not obvious.
+
+On shutdown the daemon logs `Stopping 8 bots gracefully…` and persists
+`enabled = 0` for each one. **On startup it does not re-enable them.** In practice
+one or two come back and the rest do not, so a post-restart glance at the
+dashboard looks plausible while most of the fleet is quietly not trading.
+
+Observed on a real deploy: 8 of 8 enabled before, 2 of 8 after.
+
+```bash
+# Before restarting, record what was enabled
+sqlite3 "$DB" 'select id, name, enabled from Bot order by id;'
+
+# After restarting, compare — and start anything that came back disabled
+for id in $(sqlite3 "$DB" 'select id from Bot where enabled = 0;'); do
+  curl -s -X POST -H "Authorization: $ADMIN_PASSWORD" \
+       -H 'content-type: application/json' -d "{\"botId\":$id}" \
+       "http://[::1]:8000/api/dash/actions/bot.start"
+  sleep 2
+done
+```
+
+`bot.start` on an already-running bot returns `409 Bot already running`, which is
+harmless — so the loop is safe to run over every bot if you would rather not
+diff.
+
+**What this does not do is strand your positions.** A daemon shutdown is not the
+same as the operator "Stop" button: it does not cancel the take-profit orders
+resting on the exchange. Those are the exchange's, not the daemon's, and they keep
+working the whole time the process is down. Verified across two restarts —
+`GET /positions/stranded` returned 0 both times. Check it yourself anyway:
+
+```bash
+curl -s -H "Authorization: $ADMIN_PASSWORD" \
+  "http://[::1]:8000/api/dash/positions/stranded"
 ```
 
 ### Read the preflight block
@@ -136,7 +177,9 @@ Then open the dashboard and confirm:
 
 | What went wrong | What to do |
 |---|---|
-| Daemon will not start | `systemctl stop opentrader`, `git checkout <previous-sha>`, `pnpm install --frozen-lockfile`, restart. The `AiAction` table is additive — leaving it in place is harmless. |
+| **Bots are not trading after a restart** | Expected — see [above](#restarting-the-daemon-disables-your-bots). Start each one that came back `enabled = 0`. |
+| Daemon will not start | `systemctl stop opentrader`, `git checkout <previous-sha>`, `pnpm install --frozen-lockfile`, `pnpm build`, restart, then start the bots. The `AiAction` table is additive — leaving it in place is harmless. |
+| Build fails with `spawnSync … moon ENOENT` | pnpm skipped `@moonrepo/cli`'s postinstall. `pnpm rebuild @moonrepo/cli esbuild ccxt`, then build again. `onlyBuiltDependencies` in `pnpm-workspace.yaml` prevents it on a fresh install, but does not retroactively fix an existing tree. |
 | A bot is misbehaving after restart | Stop that bot from the dashboard. Stopping cancels its resting exit orders, so check `GET /api/dash/positions/stranded` afterwards and use `position.recoverStranded`. |
 | The AI is doing something you did not expect | `POST /api/dash/actions/ai.disable`. This stops the AI and **leaves your own controls working** — unlike `/actions/freeze`, which disables agent control entirely including the buttons you would use to clean up. |
 | Autopilot ran away | It cannot: the server caps unattended actions per window and disarms on the first failure. `ai.disable` stops it immediately regardless. |
