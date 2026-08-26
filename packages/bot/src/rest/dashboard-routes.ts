@@ -31,7 +31,7 @@ import {
   aiActivity,
   chatCompletionDetailed,
   listModelCatalog,
-  listModels,
+  probeProvider,
   recordAiAction,
   resolveProvider,
   setRuntimeProvider,
@@ -171,6 +171,21 @@ type AuthedRequest = FastifyRequest & { actor?: Actor };
 const aiGuards = createAiGuards();
 
 /**
+ * The last time we actually asked the provider something, and what happened.
+ *
+ * The health check used to report a configured provider as `ok` without ever
+ * contacting it, so a provider that had never once answered showed green. The
+ * fix is not to probe on every health poll — that would bill the operator for
+ * looking at a dashboard — but to report what the real calls already know.
+ * Anything that genuinely talks to the provider records the result here.
+ */
+let lastProviderOutcome: { at: number; ok: boolean; reason: string } | null = null;
+
+function recordProviderOutcome(outcome: { ok: boolean; reason?: string }) {
+  lastProviderOutcome = { at: Date.now(), ok: outcome.ok, reason: outcome.reason ?? "" };
+}
+
+/**
  * The AI's own health, as ordinary health checks.
  *
  * Three separate questions, because an operator needs to tell them apart: is a
@@ -179,7 +194,10 @@ const aiGuards = createAiGuards();
  * them were visible on the health page before.
  *
  * A provider that is simply not configured is `ok`, not a warning — running
- * deterministic-only is a supported way to run, not a fault.
+ * deterministic-only is a supported way to run, not a fault. A provider that is
+ * configured but has never answered is `unknown` until something asks it, and
+ * `crit` once something has and it refused: configured is not the same as
+ * working, and the page should not claim otherwise.
  */
 function aiHealthChecks(): HealthCheck[] {
   const provider = resolveProvider();
@@ -191,11 +209,15 @@ function aiHealthChecks(): HealthCheck[] {
       id: "ai.provider",
       group: "AI",
       label: "AI provider",
-      status: "ok",
+      status: !provider?.model ? "ok" : !lastProviderOutcome ? "unknown" : lastProviderOutcome.ok ? "ok" : "crit",
       value: provider?.model ? `${provider.id} · ${provider.model}` : "not configured",
-      detail: provider?.model
-        ? "The council can reach a model. Trading never blocks on it: every failure path falls back to the deterministic agents."
-        : "No provider is set, so the council runs deterministic-only. That is a supported configuration, not a fault.",
+      detail: !provider?.model
+        ? "No provider is set, so the council runs deterministic-only. That is a supported configuration, not a fault."
+        : !lastProviderOutcome
+          ? "Configured, but nothing has asked it anything yet, so whether it answers is unverified. Use Test in AI settings to find out. Trading never blocks on it either way."
+          : lastProviderOutcome.ok
+            ? `Answered at ${new Date(lastProviderOutcome.at).toISOString()}. Trading never blocks on it: every failure path falls back to the deterministic agents.`
+            : `Refused at ${new Date(lastProviderOutcome.at).toISOString()}: ${lastProviderOutcome.reason} — the chat cannot answer until this is fixed. Trading is unaffected; the council falls back to its deterministic agents.`,
       metric: null,
     },
     {
@@ -322,7 +344,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/ai-settings", params: {}, description: "The saved LLM configuration (key masked) for the AI council." },
       { path: "POST /api/dash/actions/ai-settings.save", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Save and instantly apply the AI council's provider/model. provider 'none' disables it." },
       { path: "POST /api/dash/actions/ai-models", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Fetch the models a provider offers, for the settings picker. Each is { id, name, description, free, contextLength }; `free` is true when the model says so or prices at zero." },
-      { path: "POST /api/dash/actions/ai-settings.test", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Verify a provider configuration by listing its models." },
+      { path: "POST /api/dash/actions/ai-settings.test", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Verify a provider configuration by asking the model to answer. Returns { ok, model, message } where message is the provider's own reason when it refused. Deliberately a completion and not a model listing: some gateways serve /models unauthenticated, so a listing proves nothing about the key, the credit or the model id." },
       { path: "POST /api/dash/actions/ai-chat", body: { messages: "[{ role: user|assistant, content: string }]" }, scope: "control", description: "Ask the configured model about the fleet. Returns { reply, proposals, model }. Executes nothing — a proposal is carried out by a separate call to ai-execute." },
       { path: "POST /api/dash/actions/ai-execute", body: { proposal: "{ action, params, why }", autonomous: "boolean, optional" }, scope: "control", description: `Carry out one proposal from ai-chat. Allowed actions: ${Object.keys(ALLOWED_ACTIONS).join(", ")}. Dispatched through the same guarded route an operator would call, so scope, freeze, rate limit and audit all apply. With autonomous:true it also spends from the unattended-action budget, which is enforced here and not in the browser.` },
       { path: "POST /api/dash/actions/ai.disable", body: { reason: "string, optional" }, scope: "control", description: "Stop the AI acting or answering. Unlike /actions/freeze this leaves your own control endpoints working, so you can clean up after it." },
@@ -1146,13 +1168,19 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       timeoutMs: 45_000,
     });
 
-    if (answer === null) {
+    if (!answer.ok) {
+      // Logged as well as returned. The browser shows one operator this once;
+      // the log is what tells the next person why the AI was quiet all morning.
+      recordProviderOutcome(answer);
+      logger.warn(`[AI] chat via ${provider.id}/${provider.model} failed: ${answer.reason}`);
+
       return reply.code(502).send({
         error: "unavailable",
-        message: `${provider.id} did not answer. Check the key and the model id in AI settings.`,
+        message: `${provider.id} could not answer: ${answer.reason}`,
       });
     }
 
+    recordProviderOutcome(answer);
     aiGuards.budget.record(answer.tokens);
     logger.info(
       `[AI] chat via ${provider.id}/${provider.model}: ${answer.tokens} tokens, ${aiGuards.budget.spent().used} used today`,
@@ -1587,12 +1615,32 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: "bad_request", message: `an API key for ${providerId} is required` });
     }
 
-    try {
-      const models = await listModels({ id: providerId as ProviderId, model: "", baseUrl, ...(apiKey ? { apiKey } : {}) });
-      return { ok: models.length > 0, count: models.length };
-    } catch {
-      return { ok: false, count: 0 };
+    // A model id is needed because the test is a real completion, and the point
+    // is to prove *this* model answers. Fall back to whatever is saved.
+    const model = str(body.model) || (row && row.provider === providerId ? row.model : "") || "";
+    if (!model) {
+      return reply.code(400).send({ error: "bad_request", message: "choose a model before testing" });
     }
+
+    // Deliberately a completion, not a model listing. Listing `/models` on
+    // OpenRouter succeeds for a key that is pure invention — verified: an
+    // obviously fake key returns the full 417-model catalogue — so the old
+    // version of this route reported "Connection OK" for a provider that could
+    // never answer. Only a completion exercises the key, the credit and the
+    // model id together.
+    const outcome = await probeProvider({
+      id: providerId as ProviderId,
+      model,
+      baseUrl,
+      ...(apiKey ? { apiKey } : {}),
+    });
+
+    recordProviderOutcome(outcome);
+    if (!outcome.ok) logger.warn(`[AI] connection test for ${providerId}/${model} failed: ${outcome.reason}`);
+
+    return outcome.ok
+      ? { ok: true, model, message: `${providerId} answered using ${model}.` }
+      : { ok: false, model, message: outcome.reason };
   });
 
   /** Save the operator's choice; it becomes live immediately, no restart. */

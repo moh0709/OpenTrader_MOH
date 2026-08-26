@@ -229,33 +229,94 @@ describe("chatCompletionDetailed", () => {
   const ask = { system: "s", user: "u", maxTokens: 10, timeoutMs: 1000 };
 
   const reply = (payload: unknown) => {
-    globalThis.fetch = (async () => ({ ok: true, json: async () => payload })) as any;
+    // `status` matters even on the success path: a 200 carrying no message
+    // content is reported as a failure *at* 200, which is what distinguishes
+    // "the model said nothing" from "the provider refused us".
+    globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => payload })) as any;
+  };
+
+  /** A non-2xx, the way a real gateway sends one: status plus an error body. */
+  const refuse = (status: number, body = "") => {
+    globalThis.fetch = (async () => ({ ok: false, status, text: async () => body })) as any;
   };
 
   it("reports the total the backend billed", async () => {
     reply({ choices: [{ message: { content: "hi" } }], usage: { total_tokens: 812 } });
 
-    await expect(chatCompletionDetailed(provider, ask)).resolves.toEqual({ text: "hi", tokens: 812 });
+    await expect(chatCompletionDetailed(provider, ask)).resolves.toEqual({ ok: true, text: "hi", tokens: 812 });
   });
 
   it("adds prompt and completion when no total is given", async () => {
     reply({ choices: [{ message: { content: "hi" } }], usage: { prompt_tokens: 700, completion_tokens: 112 } });
 
-    expect((await chatCompletionDetailed(provider, ask))!.tokens).toBe(812);
+    const outcome = await chatCompletionDetailed(provider, ask);
+    expect(outcome.ok && outcome.tokens).toBe(812);
   });
 
   it("reports zero when the backend says nothing about usage", async () => {
     // Zero means "not reported". A meter must not read that as free.
     reply({ choices: [{ message: { content: "hi" } }] });
 
-    expect((await chatCompletionDetailed(provider, ask))!.tokens).toBe(0);
+    const outcome = await chatCompletionDetailed(provider, ask);
+    expect(outcome.ok && outcome.tokens).toBe(0);
   });
 
-  it("still returns null on a refused or empty response", async () => {
-    globalThis.fetch = (async () => ({ ok: false, status: 401 })) as any;
-    await expect(chatCompletionDetailed(provider, ask)).resolves.toBeNull();
+  /**
+   * The regression these exist for: every one of these used to arrive as the
+   * same `null`, and the dashboard turned that into one sentence blaming the
+   * key and the model id. Three faults, three fixes, one misleading message.
+   */
+  describe("says which fault it was", () => {
+    it("distinguishes a rejected key from an unfunded account", async () => {
+      refuse(401, "invalid api key");
+      const rejected = await chatCompletionDetailed(provider, ask);
+      expect(rejected.ok).toBe(false);
+      expect(!rejected.ok && rejected.status).toBe(401);
+      expect(!rejected.ok && rejected.reason).toMatch(/key was rejected/i);
 
-    reply({ choices: [] });
-    await expect(chatCompletionDetailed(provider, ask)).resolves.toBeNull();
+      refuse(402, "Insufficient credits. This account never purchased credits.");
+      const unfunded = await chatCompletionDetailed(provider, ask);
+      expect(!unfunded.ok && unfunded.reason).toMatch(/no credit/i);
+      // The provider's own words survive, because they name the account.
+      expect(!unfunded.ok && unfunded.reason).toMatch(/never purchased credits/);
+    });
+
+    it("names a rate limit and an unknown model id", async () => {
+      refuse(429, "temporarily rate-limited upstream");
+      const limited = await chatCompletionDetailed(provider, ask);
+      expect(!limited.ok && limited.reason).toMatch(/rate-limited/i);
+
+      refuse(404);
+      const missing = await chatCompletionDetailed(provider, ask);
+      expect(!missing.ok && missing.reason).toMatch(/model id is not served/i);
+    });
+
+    it("redacts anything key-shaped out of a quoted error body", async () => {
+      refuse(401, "rejected token sk-or-v1-abcdef0123456789 for this account");
+
+      const outcome = await chatCompletionDetailed(provider, ask);
+      expect(!outcome.ok && outcome.reason).toContain("[redacted]");
+      expect(!outcome.ok && outcome.reason).not.toContain("abcdef0123456789");
+    });
+
+    it("separates a 200 with no content from a refusal", async () => {
+      reply({ choices: [] });
+
+      const outcome = await chatCompletionDetailed(provider, ask);
+      expect(!outcome.ok && outcome.status).toBe(200);
+      expect(!outcome.ok && outcome.reason).toMatch(/no message content/i);
+    });
+
+    it("reports a timeout as a timeout", async () => {
+      globalThis.fetch = (async () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        throw error;
+      }) as any;
+
+      const outcome = await chatCompletionDetailed(provider, ask);
+      expect(!outcome.ok && outcome.status).toBeNull();
+      expect(!outcome.ok && outcome.reason).toMatch(/no answer within 1000ms/);
+    });
   });
 });

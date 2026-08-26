@@ -18,16 +18,34 @@ import { el, mount } from "./dom.js";
 import { getPassword } from "./api.js";
 import { toast } from "./toast.js";
 
+/**
+ * The providers on offer, and where each one lives.
+ *
+ * `baseUrl` mirrors `defaultBaseUrlFor` on the server and exists so that
+ * changing the dropdown can reset the endpoint. Without it the field kept
+ * whatever the *previous* provider used, and a saved configuration could name
+ * one provider while pointing at another's URL — which is exactly how an
+ * OpenCode key ended up being posted to openrouter.ai, failing every request
+ * while the settings panel looked correctly filled in.
+ *
+ * `custom` has no default on purpose: its whole point is an endpoint we do not
+ * know, so there is nothing to reset to and the operator's value stands.
+ */
 const PROVIDERS = [
-  { value: "openrouter", label: "OpenRouter", needsKey: true },
-  { value: "anthropic", label: "Anthropic (Claude)", needsKey: true },
-  { value: "openai", label: "OpenAI", needsKey: true },
-  { value: "gemini", label: "Google Gemini", needsKey: true },
-  { value: "ollama", label: "Ollama (local)", needsKey: false },
-  { value: "opencode-zen", label: "OpenCode Zen", needsKey: true },
-  { value: "opencode-go", label: "OpenCode Go", needsKey: true },
-  { value: "custom", label: "Custom endpoint", needsKey: false },
+  { value: "openrouter", label: "OpenRouter", needsKey: true, baseUrl: "https://openrouter.ai/api/v1" },
+  { value: "anthropic", label: "Anthropic (Claude)", needsKey: true, baseUrl: "https://api.anthropic.com" },
+  { value: "openai", label: "OpenAI", needsKey: true, baseUrl: "https://api.openai.com/v1" },
+  { value: "gemini", label: "Google Gemini", needsKey: true, baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { value: "ollama", label: "Ollama (local)", needsKey: false, baseUrl: "http://127.0.0.1:11434/v1" },
+  { value: "opencode-zen", label: "OpenCode Zen", needsKey: true, baseUrl: "https://opencode.ai/zen/v1" },
+  { value: "opencode-go", label: "OpenCode Go", needsKey: true, baseUrl: "https://opencode.ai/go/v1" },
+  { value: "custom", label: "Custom endpoint", needsKey: false, baseUrl: "" },
 ];
+
+/** The official endpoint for a provider, or "" when it has none to suggest. */
+export function defaultBaseUrl(providerId) {
+  return PROVIDERS.find((p) => p.value === providerId)?.baseUrl ?? "";
+}
 
 /** Longest list we will draw at once. Past this, narrow it with the search. */
 const MAX_ROWS = 200;
@@ -295,11 +313,19 @@ export async function renderAiSettings(container) {
 
   // A different provider offers a different catalogue; keeping the old one on
   // screen would invite picking a model the new provider has never heard of.
+  //
+  // The endpoint and the model id go with it. Leaving either behind is how a
+  // configuration ends up internally inconsistent — one provider's name, another
+  // provider's URL — and the failure that produces is a flat refusal on every
+  // completion with nothing on screen to suggest why.
   providerSelect.addEventListener("change", () => {
     catalog = [];
     active = -1;
     setOpen(false);
     drawList();
+
+    baseUrlInput.value = defaultBaseUrl(currentProvider());
+    modelInput.value = "";
   });
 
   // Reflect the saved configuration into the form.
@@ -333,19 +359,29 @@ export async function renderAiSettings(container) {
       catalog = models;
       active = -1;
       setOpen(true);
-      say(`${models.length} models available${freeCount ? `, ${freeCount} of them free` : ""}.`);
+      // Careful not to let a catalogue read as a verdict on the key: several
+      // gateways list models to anyone who asks. Test is what proves it works.
+      say(
+        `${models.length} models available${freeCount ? `, ${freeCount} of them free` : ""}. Listing does not check your key — use Test once you have picked one.`,
+      );
     } catch (error) {
       say(`Could not fetch models: ${error.message}`, true);
     }
     done();
   };
 
+  // The test asks the model a question and waits for the answer, because the
+  // cheaper check it replaced — "can we list models?" — passed on endpoints that
+  // serve their catalogue without authentication, and so reported a healthy
+  // connection for a key that had never worked.
   const testConnection = async (event) => {
     if (!currentProvider()) return say("Choose a provider first.", true);
-    const done = busy(event.target, "Testing…");
+    if (!modelInput.value.trim()) return say("Pick or type a model first — the test asks that model to answer.", true);
+
+    const done = busy(event.target, "Asking the model…");
     try {
-      const result = await dash("actions/ai-settings.test", payload());
-      say(result.ok ? `Connection OK — ${result.count} models reachable.` : "The provider did not answer. Check the key and base URL.", !result.ok);
+      const result = await dash("actions/ai-settings.test", { ...payload(), model: modelInput.value.trim() });
+      say(result.message, !result.ok);
     } catch (error) {
       say(`Test failed: ${error.message}`, true);
     }

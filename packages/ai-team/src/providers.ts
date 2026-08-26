@@ -166,16 +166,70 @@ export type ChatResult = {
 };
 
 /**
- * One OpenAI-compatible chat completion, with usage where the backend reports
- * it. Returns null on any failure — timeout, non-2xx, malformed body. A
- * structured-response request that the backend rejects is retried once without
- * it, since support varies even between versions of the same runtime.
+ * Why a completion did not happen.
+ *
+ * This type exists because the shape it replaces — a bare `null` — cost a
+ * production morning. A key sent to the wrong endpoint, an unfunded account and
+ * a saturated free tier are three different faults with three different fixes,
+ * and all three reached the operator as one sentence guessing at a fourth
+ * ("check the key and the model id"). The provider states which it is on every
+ * one of those responses; we were reading `response.ok` and discarding the rest.
  */
-export async function chatCompletionDetailed(
-  provider: ProviderConfig,
-  request: ChatRequest,
-): Promise<ChatResult | null> {
-  const send = async (payload: Record<string, unknown>): Promise<ChatResult | null> => {
+export type ChatFailure = {
+  /** HTTP status, or null when the call never reached the provider. */
+  status: number | null;
+  /** One operator-facing line, carrying the provider's own words where it gave any. */
+  reason: string;
+};
+
+export type ChatOutcome = ({ ok: true } & ChatResult) | ({ ok: false } & ChatFailure);
+
+/** How much of the provider's error body to quote back. */
+const REASON_BODY_MAX = 240;
+
+/**
+ * Anything key-shaped, so a quoted error body cannot become a key disclosure.
+ *
+ * The body is the provider's reply rather than our request, so it should never
+ * contain the bearer token — but "should never" is not a property we can check,
+ * and this text is bound for the daemon log and the dashboard.
+ */
+const KEY_SHAPED = /\b(sk|pk|api|key|tok)[-_][A-Za-z0-9._-]{8,}/gi;
+
+/**
+ * Turn a failed HTTP response into something an operator can act on.
+ *
+ * The mapping is deliberately about *what to do*, not about what the number is
+ * called: 402 is not "Payment Required" here, it is "the account has no credit",
+ * because that is the sentence that gets someone to the right settings page.
+ */
+function describeHttpFailure(status: number, body: string): ChatFailure {
+  const detail = body.replace(KEY_SHAPED, "[redacted]").trim().slice(0, REASON_BODY_MAX);
+
+  const known =
+    status === 401 || status === 403
+      ? "the API key was rejected — check it belongs to this provider and base URL"
+      : status === 402
+        ? "the account has no credit"
+        : status === 404
+          ? "the model id is not served at this base URL"
+          : status === 429
+            ? "rate-limited, by your account or by the model's shared free tier"
+            : status >= 500
+              ? "the provider is failing"
+              : "the request was refused";
+
+  return { status, reason: detail ? `HTTP ${status} — ${known}: ${detail}` : `HTTP ${status} — ${known}` };
+}
+
+/**
+ * One OpenAI-compatible chat completion, with usage where the backend reports
+ * it — or the reason it did not happen. A structured-response request that the
+ * backend rejects is retried once without it, since support varies even between
+ * versions of the same runtime.
+ */
+export async function chatCompletionDetailed(provider: ProviderConfig, request: ChatRequest): Promise<ChatOutcome> {
+  const send = async (payload: Record<string, unknown>): Promise<ChatOutcome> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), request.timeoutMs);
 
@@ -190,21 +244,42 @@ export async function chatCompletionDetailed(
         signal: controller.signal,
       });
 
-      if (!response.ok) return null;
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        return { ok: false, ...describeHttpFailure(response.status, body) };
+      }
+
       const json = (await response.json()) as {
         choices?: { message?: { content?: string } }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       };
 
       const text = json.choices?.[0]?.message?.content;
-      if (!text) return null;
+      if (!text) {
+        // A 200 with nothing in it is its own diagnosis, and a common one on
+        // reasoning models: the whole allowance went on hidden reasoning tokens
+        // and the visible message came back empty.
+        return {
+          ok: false,
+          status: response.status,
+          reason: `answered ${response.status} with no message content — the model may have spent its ${request.maxTokens}-token allowance on reasoning`,
+        };
+      }
 
       const usage = json.usage ?? {};
       const total = usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
 
-      return { text, tokens: Number.isFinite(total) ? total : 0 };
-    } catch {
-      return null;
+      return { ok: true, text, tokens: Number.isFinite(total) ? total : 0 };
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === "AbortError";
+
+      return {
+        ok: false,
+        status: null,
+        reason: aborted
+          ? `no answer within ${request.timeoutMs}ms`
+          : `could not reach ${provider.baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -221,37 +296,58 @@ export async function chatCompletionDetailed(
   if (request.json) body.response_format = { type: "json_object" };
 
   const first = await send(body);
-  if (first) return first;
+  if (first.ok) return first;
 
   // A failure right after adding response_format may mean the backend does not
-  // know that field. Retry plain once before giving up.
+  // know that field. Retry plain once before giving up, and report the retry's
+  // reason rather than the first one: it describes the request we would
+  // actually have sent.
   if (request.json) {
     delete body.response_format;
-    const second = await send(body);
-    if (second) return second;
+    return send(body);
   }
 
-  return null;
+  return first;
 }
 
 /**
- * The text of one completion, with the usage discarded.
+ * The text of one completion, with the reason for failure discarded.
  *
- * Every existing caller — the council's LLM strategist, the reflector — wants
- * the answer and has no meter to feed, so they keep the simpler signature.
+ * The council's LLM strategist and the reflector both want the answer and have
+ * nowhere to put a reason — a council member that cannot speak simply abstains,
+ * which is the designed behaviour. Anything with an operator in front of it
+ * should call `chatCompletionDetailed` and say what went wrong.
  */
 export async function chatCompletion(provider: ProviderConfig, request: ChatRequest): Promise<string | null> {
-  return (await chatCompletionDetailed(provider, request))?.text ?? null;
+  const outcome = await chatCompletionDetailed(provider, request);
+  return outcome.ok ? outcome.text : null;
 }
 
-/** Cheap liveness probe: list models. Used by health checks, not trading. */
+/**
+ * Will this configuration actually answer?
+ *
+ * Deliberately a real completion, not a model listing. Several gateways serve
+ * `/models` without authentication — OpenRouter returns its full catalogue of
+ * several hundred models to a key that is pure invention — so a listing proves
+ * the URL exists and nothing whatever about the credential, the credit balance
+ * or the model id. That false green is what let a broken provider sit behind a
+ * "Connection OK" message. The only evidence that a provider will answer is
+ * asking it to.
+ */
+export async function probeProvider(provider: ProviderConfig): Promise<ChatOutcome> {
+  return chatCompletionDetailed(provider, {
+    system: "Reply with the single word OK.",
+    user: "ping",
+    // Generous enough that a model which emits a few reasoning tokens still
+    // produces visible content, small enough to be free in practice.
+    maxTokens: 64,
+    timeoutMs: 15_000,
+  });
+}
+
+/** Whether the provider will answer. See `probeProvider` for why this is not a listing. */
 export async function checkProvider(provider: ProviderConfig): Promise<boolean> {
-  try {
-    const models = await listModels(provider);
-    return models.length > 0;
-  } catch {
-    return false;
-  }
+  return (await probeProvider(provider)).ok;
 }
 
 /** One model as the settings picker needs it: what to send, and what to show. */

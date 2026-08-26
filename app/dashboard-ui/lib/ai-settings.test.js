@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterModels, shortContext } from "./ai-settings.js";
+import { defaultBaseUrl, filterModels, shortContext } from "./ai-settings.js";
 
 const model = (over = {}) => ({
   id: "anthropic/claude-opus-5",
@@ -79,5 +79,36 @@ describe("shortContext", () => {
     expect(shortContext(null)).toBe("");
     expect(shortContext(undefined)).toBe("");
     expect(shortContext(0)).toBe("");
+  });
+});
+
+/**
+ * These pin the endpoint half of a saved configuration.
+ *
+ * The bug they guard against: switching provider left the previous provider's
+ * base URL in the field, so a configuration could be saved naming one provider
+ * and addressing another. It produced a flat refusal on every completion, with
+ * a settings panel that looked entirely filled in.
+ */
+describe("defaultBaseUrl", () => {
+  it("gives each provider its own endpoint", () => {
+    expect(defaultBaseUrl("openrouter")).toBe("https://openrouter.ai/api/v1");
+    expect(defaultBaseUrl("opencode-go")).toBe("https://opencode.ai/go/v1");
+    expect(defaultBaseUrl("anthropic")).toBe("https://api.anthropic.com");
+  });
+
+  it("never hands one provider another's endpoint", () => {
+    const ids = ["openrouter", "anthropic", "openai", "gemini", "ollama", "opencode-zen", "opencode-go"];
+    const urls = ids.map(defaultBaseUrl);
+
+    expect(urls.every(Boolean)).toBe(true);
+    expect(new Set(urls).size).toBe(ids.length);
+  });
+
+  it("suggests nothing for a custom endpoint or an unknown provider", () => {
+    // "custom" means an endpoint we do not know, so there is nothing to reset
+    // to and whatever the operator typed has to stand.
+    expect(defaultBaseUrl("custom")).toBe("");
+    expect(defaultBaseUrl("not-a-provider")).toBe("");
   });
 });
