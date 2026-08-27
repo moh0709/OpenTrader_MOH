@@ -4,13 +4,26 @@
     "baseUrl": ".",
     "outDir": "../../dts/packages/arbitrage",
     "paths": {
-      "@opentrader/tsconfig/*": ["../tsconfig/*"],
-      "@opentrader/types": ["../types/src/index.ts"],
-      "@opentrader/types/*": ["../types/src/*"],
-      "@opentrader/logger": ["../logger/src/index.ts"]
+      "@opentrader/tsconfig/*": [
+        "../tsconfig/*"
+      ],
+      "@opentrader/types": [
+        "../types/src/index.ts"
+      ],
+      "@opentrader/types/*": [
+        "../types/src/*"
+      ],
+      "@opentrader/logger": [
+        "../logger/src/index.ts"
+      ],
+      "@opentrader/logger/*": [
+        "../logger/src/*"
+      ]
     }
   },
-  "include": ["src/**/*"],
+  "include": [
+    "src/**/*"
+  ],
   "references": [
     {
       "path": "../tsconfig"

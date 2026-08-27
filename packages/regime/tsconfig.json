@@ -4,11 +4,20 @@
     "baseUrl": ".",
     "outDir": "../../dts/packages/regime",
     "paths": {
-      "@opentrader/tsconfig/*": ["../tsconfig/*"],
-      "@opentrader/logger": ["../logger/src/index.ts"]
+      "@opentrader/tsconfig/*": [
+        "../tsconfig/*"
+      ],
+      "@opentrader/logger": [
+        "../logger/src/index.ts"
+      ],
+      "@opentrader/logger/*": [
+        "../logger/src/*"
+      ]
     }
   },
-  "include": ["src/**/*"],
+  "include": [
+    "src/**/*"
+  ],
   "references": [
     {
       "path": "../tsconfig"

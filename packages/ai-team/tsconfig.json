@@ -4,15 +4,38 @@
     "baseUrl": ".",
     "outDir": "../../dts/packages/ai-team",
     "paths": {
-      "@opentrader/tsconfig/*": ["../tsconfig/*"],
-      "@opentrader/types": ["../types/src/index.ts"],
-      "@opentrader/types/*": ["../types/src/*"],
-      "@opentrader/logger": ["../logger/src/index.ts"],
-      "@opentrader/arbitrage": ["../arbitrage/src/index.ts"],
-      "@opentrader/exchanges": ["../exchanges/src/index.ts"]
+      "@opentrader/tsconfig/*": [
+        "../tsconfig/*"
+      ],
+      "@opentrader/types": [
+        "../types/src/index.ts"
+      ],
+      "@opentrader/types/*": [
+        "../types/src/*"
+      ],
+      "@opentrader/logger": [
+        "../logger/src/index.ts"
+      ],
+      "@opentrader/arbitrage": [
+        "../arbitrage/src/index.ts"
+      ],
+      "@opentrader/exchanges": [
+        "../exchanges/src/index.ts"
+      ],
+      "@opentrader/arbitrage/*": [
+        "../arbitrage/src/*"
+      ],
+      "@opentrader/exchanges/*": [
+        "../exchanges/src/*"
+      ],
+      "@opentrader/logger/*": [
+        "../logger/src/*"
+      ]
     }
   },
-  "include": ["src/**/*"],
+  "include": [
+    "src/**/*"
+  ],
   "references": [
     {
       "path": "../tsconfig"
