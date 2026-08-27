@@ -37,8 +37,10 @@ const PROVIDERS = [
   { value: "openai", label: "OpenAI", needsKey: true, baseUrl: "https://api.openai.com/v1" },
   { value: "gemini", label: "Google Gemini", needsKey: true, baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
   { value: "ollama", label: "Ollama (local)", needsKey: false, baseUrl: "http://127.0.0.1:11434/v1" },
-  { value: "opencode-zen", label: "OpenCode Zen", needsKey: true, baseUrl: "https://opencode.ai/zen/v1" },
-  { value: "opencode-go", label: "OpenCode Go", needsKey: true, baseUrl: "https://opencode.ai/go/v1" },
+  // One OpenCode entry, not two. Zen and Go are the same account and the same
+  // key; offering both let a key be aimed at a tier it was not entitled to and
+  // report back as a dead endpoint. Zen is the tier kept — see providers.ts.
+  { value: "opencode-zen", label: "OpenCode", needsKey: true, baseUrl: "https://opencode.ai/zen/v1" },
   { value: "custom", label: "Custom endpoint", needsKey: false, baseUrl: "" },
 ];
 

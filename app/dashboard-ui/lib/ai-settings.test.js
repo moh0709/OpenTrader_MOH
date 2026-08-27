@@ -93,12 +93,12 @@ describe("shortContext", () => {
 describe("defaultBaseUrl", () => {
   it("gives each provider its own endpoint", () => {
     expect(defaultBaseUrl("openrouter")).toBe("https://openrouter.ai/api/v1");
-    expect(defaultBaseUrl("opencode-go")).toBe("https://opencode.ai/go/v1");
+    expect(defaultBaseUrl("opencode-zen")).toBe("https://opencode.ai/zen/v1");
     expect(defaultBaseUrl("anthropic")).toBe("https://api.anthropic.com");
   });
 
   it("never hands one provider another's endpoint", () => {
-    const ids = ["openrouter", "anthropic", "openai", "gemini", "ollama", "opencode-zen", "opencode-go"];
+    const ids = ["openrouter", "anthropic", "openai", "gemini", "ollama", "opencode-zen"];
     const urls = ids.map(defaultBaseUrl);
 
     expect(urls.every(Boolean)).toBe(true);

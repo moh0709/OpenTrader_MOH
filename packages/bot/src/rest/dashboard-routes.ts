@@ -31,6 +31,7 @@ import {
   aiActivity,
   chatCompletionDetailed,
   listModelCatalog,
+  migrateProviderChoice,
   probeProvider,
   recordAiAction,
   resolveProvider,
@@ -949,12 +950,33 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
   // survives restarts. Saving applies live via the runtime override — no
   // restart. The key is never echoed back, only a mask.
 
-  const AI_PROVIDER_IDS = ["anthropic", "openai", "openrouter", "gemini", "ollama", "opencode-zen", "opencode-go", "custom"];
+  // `opencode-go` is deliberately absent: Zen and Go are one account and one
+  // key, and offering both invited a key being pointed at a tier it had no
+  // entitlement to. A saved row still naming it is migrated on read.
+  const AI_PROVIDER_IDS = ["anthropic", "openai", "openrouter", "gemini", "ollama", "opencode-zen", "custom"];
 
   type AiSettingsRow = { provider: string; model: string; apiKey: string | null; baseUrl: string | null };
 
-  const loadAiSettings = async (): Promise<AiSettingsRow | null> =>
-    (await xprisma.aiSettings.findUnique({ where: { id: 1 } })) as AiSettingsRow | null;
+  /**
+   * The saved row, with any base URL we have since discovered to be dead
+   * rewritten to the working one. The repair is applied on read rather than by
+   * a migration so that a configuration saved against the old default starts
+   * working on this deploy, without the operator having to notice, and the
+   * corrected value is what the panel shows and the next save persists.
+   */
+  const loadAiSettings = async (): Promise<AiSettingsRow | null> => {
+    const row = (await xprisma.aiSettings.findUnique({ where: { id: 1 } })) as AiSettingsRow | null;
+    if (!row || row.provider === "none") return row;
+
+    const migrated = migrateProviderChoice(row.provider, row.baseUrl);
+    if (!migrated.changed) return row;
+
+    // Said out loud, because moving somebody between billing tiers is not the
+    // kind of thing that should happen quietly.
+    logger.info(`[AI] Saved settings migrated: ${row.provider} ${row.baseUrl ?? "(no URL)"} -> ${migrated.id} ${migrated.baseUrl}`);
+
+    return { ...row, provider: migrated.id, baseUrl: migrated.baseUrl };
+  };
 
   /** Push a saved row into the council immediately. */
   function applyAiSettings(row: AiSettingsRow | null) {
@@ -998,7 +1020,6 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
       ollama: "http://127.0.0.1:11434/v1",
       "opencode-zen": "https://opencode.ai/zen/v1",
-      "opencode-go": "https://opencode.ai/go/v1",
     };
     return defaults[providerId] ?? "";
   }

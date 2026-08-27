@@ -175,7 +175,7 @@ format and are reached through one adapter.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AI_PROVIDER` | auto | `anthropic` `openai` `openrouter` `gemini` `ollama` `opencode-zen` `opencode-go` `custom` |
+| `AI_PROVIDER` | auto | `anthropic` `openai` `openrouter` `gemini` `ollama` `opencode-zen` `custom` |
 | `AI_MODEL` | per provider | Model id, e.g. `qwen3:14b`, `gpt-5`, `gemini-2.5-pro` |
 | `AI_API_KEY` | – | Generic key; provider-specific keys below also work |
 | `AI_BASE_URL` | per provider | Override the endpoint (required for `custom`) |

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatCompletion, chatCompletionDetailed, isFreeModel, listModelCatalog, listModels, resolveProvider } from "./providers.js";
+import { chatCompletion, chatCompletionDetailed, getRuntimeProvider, isFreeModel, listModelCatalog, listModels, migrateProviderChoice, resolveProvider, setRuntimeProvider } from "./providers.js";
 
 
 /**
@@ -318,5 +318,123 @@ describe("chatCompletionDetailed", () => {
       expect(!outcome.ok && outcome.status).toBeNull();
       expect(!outcome.ok && outcome.reason).toMatch(/no answer within 1000ms/);
     });
+  });
+});
+
+
+/**
+ * A gateway's status line is the weaker evidence. OpenCode reports a missing
+ * payment method as `401 CreditsError`, which read as a rejected key and sent
+ * the operator to re-check a credential that was never the problem.
+ */
+describe("failure reasons", () => {
+  const fetchFailing = (status: number, body: string) =>
+    async () => new Response(body, { status });
+
+  const reasonFor = async (status: number, body: string) => {
+    const original = globalThis.fetch;
+    globalThis.fetch = fetchFailing(status, body) as never;
+    try {
+      const outcome = await chatCompletionDetailed(
+        { id: "opencode-zen", baseUrl: "https://api.test", model: "hy3-free", apiKey: "sk-x" },
+        { system: "s", user: "u", maxTokens: 8, timeoutMs: 5_000 },
+      );
+      return outcome.ok ? "" : outcome.reason;
+    } finally {
+      globalThis.fetch = original;
+    }
+  };
+
+  it("believes the body over the status when they disagree", async () => {
+    const reason = await reasonFor(401, '{"error":{"type":"CreditsError","message":"No payment method."}}');
+    expect(reason).toContain("the account has no credit");
+    expect(reason).not.toContain("API key was rejected");
+  });
+
+  it("still blames the key when the body agrees it is the key", async () => {
+    expect(await reasonFor(401, '{"error":{"type":"AuthError","message":"Invalid API key."}}')).toContain(
+      "API key was rejected",
+    );
+  });
+
+  it("names a bad model id rather than the credential", async () => {
+    const reason = await reasonFor(401, '{"error":{"type":"ModelError","message":"Model google is not supported"}}');
+    expect(reason).toContain("not served at this base URL");
+  });
+
+  it("falls back to the status when the body says nothing useful", async () => {
+    expect(await reasonFor(401, "nope")).toContain("API key was rejected");
+    expect(await reasonFor(503, "")).toContain("the provider is failing");
+  });
+});
+
+/**
+ * OpenCode is one provider now.
+ *
+ * Zen and Go were the same account and the same key. Zen is the survivor on
+ * measured evidence: against an account with no payment method, every Go model
+ * returns `CreditsError` while Zen's `-free` models answer normally.
+ */
+describe("opencode", () => {
+  it("resolves to the Zen gateway with a model that answers unfunded", () => {
+    const provider = resolveProvider({ AI_PROVIDER: "opencode-zen", OPENCODE_ZEN_API_KEY: "sk-zen" });
+    expect(provider?.baseUrl).toBe("https://opencode.ai/zen/v1");
+    expect(provider?.model).toBe("nemotron-3-ultra-free");
+  });
+
+  it("accepts a Go key, since one credential covers both tiers", () => {
+    expect(resolveProvider({ AI_PROVIDER: "opencode-zen", OPENCODE_GO_API_KEY: "sk-go" })?.apiKey).toBe("sk-go");
+  });
+
+  it("no longer offers go as its own provider", () => {
+    expect(resolveProvider({ AI_PROVIDER: "opencode-go", OPENCODE_GO_API_KEY: "sk-go" })).toBeNull();
+  });
+
+  it("rewrites the base URL that was never a gateway", () => {
+    expect(migrateProviderChoice("opencode-zen", "https://opencode.ai/go/v1")).toMatchObject({
+      id: "opencode-zen",
+      baseUrl: "https://opencode.ai/zen/v1",
+      changed: true,
+    });
+  });
+
+  it("carries a retired go configuration over to zen, endpoint and all", () => {
+    expect(migrateProviderChoice("opencode-go", "https://opencode.ai/zen/go/v1")).toEqual({
+      id: "opencode-zen",
+      baseUrl: "https://opencode.ai/zen/v1",
+      changed: true,
+    });
+  });
+
+  it("migrates the exact row production was left holding", () => {
+    // provider=opencode-go, baseUrl=https://opencode.ai/go/v1 — a retired tier
+    // pointed at a URL that never existed.
+    expect(migrateProviderChoice("opencode-go", "https://opencode.ai/go/v1")).toEqual({
+      id: "opencode-zen",
+      baseUrl: "https://opencode.ai/zen/v1",
+      changed: true,
+    });
+  });
+
+  it("never leaves a retired id pointing at its old endpoint", () => {
+    expect(migrateProviderChoice("opencode-go", "https://example.test/v1").baseUrl).toBe("https://opencode.ai/zen/v1");
+  });
+
+  it("leaves a live provider and a deliberate override alone", () => {
+    expect(migrateProviderChoice("opencode-zen", "https://proxy.internal/v1")).toEqual({
+      id: "opencode-zen",
+      baseUrl: "https://proxy.internal/v1",
+      changed: false,
+    });
+    expect(migrateProviderChoice("openrouter", "https://opencode.ai/go/v1").changed).toBe(false);
+  });
+
+  // Keep last in the file: there is no way to return the runtime override to
+  // "unset", so this leaves the module in the operator-disabled state.
+  it("migrates a restored runtime override so the daemon comes up on a live endpoint", () => {
+    setRuntimeProvider({ id: "opencode-go" as never, baseUrl: "https://opencode.ai/go/v1", model: "hy3-free", apiKey: "sk" });
+    expect(getRuntimeProvider()).toMatchObject({ id: "opencode-zen", baseUrl: "https://opencode.ai/zen/v1" });
+    expect(resolveProvider({})?.baseUrl).toBe("https://opencode.ai/zen/v1");
+    setRuntimeProvider(null);
   });
 });

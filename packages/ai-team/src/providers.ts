@@ -22,7 +22,6 @@ export type ProviderId =
   | "gemini"
   | "ollama"
   | "opencode-zen"
-  | "opencode-go"
   | "custom";
 
 export type ProviderConfig = {
@@ -42,9 +41,76 @@ const DEFAULTS: Record<Exclude<ProviderId, "custom">, { baseUrl: string; keyEnv:
   gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyEnv: ["GEMINI_API_KEY", "GOOGLE_API_KEY"] },
   // Local runtimes usually need no key at all.
   ollama: { baseUrl: "http://127.0.0.1:11434/v1", keyEnv: [] },
-  "opencode-zen": { baseUrl: "https://opencode.ai/zen/v1", keyEnv: ["OPENCODE_ZEN_API_KEY"] },
-  "opencode-go": { baseUrl: "https://opencode.ai/go/v1", keyEnv: ["OPENCODE_GO_API_KEY"] },
+  // OpenCode is offered as one provider, not two.
+  //
+  // Zen and Go are the same account and the same key — you sign in to Zen and
+  // subscribe to Go — differing only in the path segment, the catalogue and who
+  // pays. Two dropdown entries sharing one credential invited exactly the
+  // confusion they produced: a working key, aimed at a tier it had no
+  // entitlement to, reported back as a dead endpoint.
+  //
+  // Zen is the one kept, on measured evidence rather than on catalogue size.
+  // Verified against an account with no payment method: every Go model and
+  // every paid Zen model returns `CreditsError`, but Zen's `-free` models
+  // answer normally. Zen therefore works on an unfunded account and Go cannot,
+  // and adding a card later unlocks all 63 Zen models without a config change.
+  "opencode-zen": { baseUrl: "https://opencode.ai/zen/v1", keyEnv: ["OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY"] },
 };
+
+/** Provider ids that no longer exist, and what a saved one becomes. */
+const RETIRED_PROVIDERS: Record<string, ProviderId> = {
+  // Same account, same key, same host — only the tier differs.
+  "opencode-go": "opencode-zen",
+};
+
+/**
+ * Base URLs that were wrong, or belong to a retired tier, and are now sitting
+ * in somebody's database.
+ *
+ * `opencode-go` shipped pointing at `https://opencode.ai/go/v1`, which is a web
+ * page rather than a gateway: every request returned a 404 of HTML, so the
+ * model list came back empty and the settings panel could only report that the
+ * endpoint offered no models. Correcting the default fixes new installs; this
+ * table fixes the ones that already saved the broken value, without making the
+ * operator work out what to retype.
+ *
+ * Only exact matches are rewritten. An operator who deliberately pointed the
+ * provider somewhere else keeps their URL.
+ */
+const LEGACY_BASE_URLS: Partial<Record<ProviderId, Record<string, string>>> = {
+  "opencode-zen": {
+    // Never existed: the original typo, a marketing page that 404s every call.
+    "https://opencode.ai/go/v1": "https://opencode.ai/zen/v1",
+    // Real, but the retired Go tier — the endpoint must follow the provider id.
+    "https://opencode.ai/zen/go/v1": "https://opencode.ai/zen/v1",
+  },
+};
+
+/**
+ * What a saved configuration should be read as today.
+ *
+ * Applied on read rather than as a schema migration, so a row written against
+ * a retired id or a dead URL starts working on this deploy without the operator
+ * having to discover what changed. `changed` lets callers say so out loud
+ * instead of silently moving somebody between billing tiers.
+ */
+export function migrateProviderChoice(
+  id: string,
+  baseUrl: string | null | undefined,
+): { id: ProviderId; baseUrl: string; changed: boolean } {
+  const nextId = RETIRED_PROVIDERS[id] ?? (id as ProviderId);
+  const trimmed = (baseUrl ?? "").trim().replace(/\/$/, "");
+
+  // A retired provider drags its old endpoint with it: keeping Zen's URL under
+  // Go's id is the internally-inconsistent state this whole layer exists to stop.
+  // So a retired id falls back to the new provider's own default, not the URL
+  // that was saved beside the old one.
+  const retired = nextId !== id;
+  const fallback = retired && nextId !== "custom" ? DEFAULTS[nextId].baseUrl : trimmed;
+  const nextBase = LEGACY_BASE_URLS[nextId]?.[trimmed] ?? (trimmed ? fallback : trimmed);
+
+  return { id: nextId, baseUrl: nextBase, changed: nextId !== id || nextBase !== trimmed };
+}
 
 /** Suggested models, used when AI_MODEL does not name one for the provider. */
 const FALLBACK_MODELS: Partial<Record<ProviderId, string>> = {
@@ -53,6 +119,8 @@ const FALLBACK_MODELS: Partial<Record<ProviderId, string>> = {
   openrouter: "openrouter/auto",
   gemini: "gemini-2.5-pro",
   ollama: "qwen3:14b",
+  // Verified to answer with no payment method on the account.
+  "opencode-zen": "nemotron-3-ultra-free",
 };
 
 function firstEnv(env: NodeJS.ProcessEnv, names: string[]): string | undefined {
@@ -73,7 +141,13 @@ let runtimeOverride: ProviderConfig | null | undefined = undefined;
 
 /** Apply (or clear, with null) the dashboard's provider choice. Live at once. */
 export function setRuntimeProvider(config: ProviderConfig | null) {
-  runtimeOverride = config;
+  if (!config) {
+    runtimeOverride = null;
+    return;
+  }
+
+  const { id, baseUrl } = migrateProviderChoice(config.id, config.baseUrl);
+  runtimeOverride = { ...config, id, baseUrl };
 }
 
 /** What the operator saved, if anything. Undefined means "not set". */
@@ -197,17 +271,42 @@ const REASON_BODY_MAX = 240;
 const KEY_SHAPED = /\b(sk|pk|api|key|tok)[-_][A-Za-z0-9._-]{8,}/gi;
 
 /**
+ * What the body says, for when it contradicts the status line.
+ *
+ * Gateways are not consistent about which status carries which failure, and the
+ * status is the weaker evidence. OpenCode answers a missing payment method with
+ * `401 CreditsError`, which the status-derived text below reads as a rejected
+ * key — sending the operator off to re-check a credential that was never the
+ * problem, which is exactly the wrong page to be on. Where the body names a
+ * cause we recognise, the body wins.
+ */
+const BODY_CAUSES: Array<[RegExp, string]> = [
+  [
+    /credits?[_ ]?error|no payment method|add a payment method|insufficient (credit|balance|funds)|billing/i,
+    "the key was accepted but the account has no credit — add a payment method",
+  ],
+  [/quota|rate[_ ]?limit/i, "the account is out of quota for this model"],
+  [
+    /upstream|temporarily unavailable|model is unavailable|overloaded|capacity/i,
+    "the model's upstream provider is unavailable right now — try another model",
+  ],
+  [/(model .{0,40}(not supported|not found|does not exist))|unknown model|invalid model/i, "the model id is not served at this base URL"],
+  [/auth[_ ]?error|invalid api key|unauthorized/i, "the API key was rejected — check it belongs to this provider and base URL"],
+];
+
+/**
  * Turn a failed HTTP response into something an operator can act on.
  *
  * The mapping is deliberately about *what to do*, not about what the number is
  * called: 402 is not "Payment Required" here, it is "the account has no credit",
  * because that is the sentence that gets someone to the right settings page.
  */
-function describeHttpFailure(status: number, body: string): ChatFailure {
-  const detail = body.replace(KEY_SHAPED, "[redacted]").trim().slice(0, REASON_BODY_MAX);
+function causeFor(status: number, safeBody: string): string {
+  const stated = BODY_CAUSES.find(([pattern]) => pattern.test(safeBody))?.[1];
 
-  const known =
-    status === 401 || status === 403
+  return (
+    stated ??
+    (status === 401 || status === 403
       ? "the API key was rejected — check it belongs to this provider and base URL"
       : status === 402
         ? "the account has no credit"
@@ -217,7 +316,14 @@ function describeHttpFailure(status: number, body: string): ChatFailure {
             ? "rate-limited, by your account or by the model's shared free tier"
             : status >= 500
               ? "the provider is failing"
-              : "the request was refused";
+              : "the request was refused")
+  );
+}
+
+function describeHttpFailure(status: number, body: string): ChatFailure {
+  const safe = body.replace(KEY_SHAPED, "[redacted]").trim();
+  const detail = safe.slice(0, REASON_BODY_MAX);
+  const known = causeFor(status, safe);
 
   return { status, reason: detail ? `HTTP ${status} — ${known}: ${detail}` : `HTTP ${status} — ${known}` };
 }
@@ -252,9 +358,25 @@ export async function chatCompletionDetailed(provider: ProviderConfig, request: 
       const json = (await response.json()) as {
         choices?: { message?: { content?: string } }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+        error?: { type?: string; message?: string };
       };
 
       const text = json.choices?.[0]?.message?.content;
+
+      // A 200 is not a success on every gateway. OpenCode's free tier answers
+      // 200 and puts an upstream failure in the body, so reading only the status
+      // reported a saturated provider as the reasoning-overspend case below —
+      // sending the operator to raise a token limit that was never the problem.
+      if (!text && json.error?.message) {
+        const safe = json.error.message.replace(KEY_SHAPED, "[redacted]").trim();
+
+        return {
+          ok: false,
+          status: response.status,
+          reason: `answered ${response.status} carrying an error — ${causeFor(response.status, safe)}: ${safe.slice(0, REASON_BODY_MAX)}`,
+        };
+      }
+
       if (!text) {
         // A 200 with nothing in it is its own diagnosis, and a common one on
         // reasoning models: the whole allowance went on hidden reasoning tokens

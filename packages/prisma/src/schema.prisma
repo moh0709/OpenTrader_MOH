@@ -416,7 +416,7 @@ model LearningJournal {
 model AiSettings {
   id Int @id @default(1)
 
-  /// anthropic | openai | openrouter | gemini | ollama | opencode-zen | opencode-go | custom
+  /// anthropic | openai | openrouter | gemini | ollama | opencode-zen | custom
   provider String
   model    String
   apiKey   String?
