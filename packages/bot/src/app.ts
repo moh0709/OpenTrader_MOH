@@ -20,7 +20,7 @@ import { retentionDays, xprisma } from "@opentrader/db";
 import { createServer, CreateServerOptions } from "./server.js";
 import { RegimeService } from "./regime/regime.service.js";
 import { startLearningLoop } from "./learning/learning.service.js";
-import { setRuntimeProvider } from "@opentrader/ai-team";
+import { migrateProviderChoice, setRuntimeProvider } from "@opentrader/ai-team";
 import { dashboardService } from "@opentrader/trpc";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 import { runPreflight } from "./preflight.js";
@@ -75,13 +75,18 @@ export class App {
           setRuntimeProvider(null);
           logger.info("[AI] Council disabled by saved settings");
         } else {
+          // Report what the council actually came up on, not what the row said.
+          // `setRuntimeProvider` migrates a retired provider id and a dead base
+          // URL, so logging the raw row claimed a tier the daemon was not using.
+          const chosen = migrateProviderChoice(row.provider, row.baseUrl);
+
           setRuntimeProvider({
-            id: row.provider as never,
-            baseUrl: row.baseUrl ?? "",
+            id: chosen.id,
+            baseUrl: chosen.baseUrl,
             model: row.model,
             ...(row.apiKey ? { apiKey: row.apiKey } : {}),
           });
-          logger.info(`[AI] Council restored to ${row.provider}:${row.model}`);
+          logger.info(`[AI] Council restored to ${chosen.id}:${row.model}${chosen.changed ? ` (migrated from ${row.provider})` : ""}`);
         }
       })
       .catch((err) => logger.warn(`[AI] Could not restore saved settings: ${err instanceof Error ? err.message : String(err)}`));
