@@ -460,10 +460,16 @@ export async function probeProvider(provider: ProviderConfig): Promise<ChatOutco
   return chatCompletionDetailed(provider, {
     system: "Reply with the single word OK.",
     user: "ping",
-    // Generous enough that a model which emits a few reasoning tokens still
-    // produces visible content, small enough to be free in practice.
-    maxTokens: 64,
-    timeoutMs: 15_000,
+    // A reasoning model spends this allowance before it writes anything the
+    // caller can see, so too small a budget fails a provider that works.
+    // 64 was too small: `hy3-free` answers 6 times out of 6 at 1000 tokens and
+    // intermittently returns empty content at 64, which the panel reported as a
+    // broken configuration while the council using it was fine. This is a cap
+    // rather than a charge — a model that replies "OK" is billed for "OK" — so
+    // the headroom costs nothing on a model that does not need it.
+    maxTokens: 1_000,
+    // Reasoning takes longer than the one word asked for.
+    timeoutMs: 30_000,
   });
 }
 
