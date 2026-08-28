@@ -8,7 +8,16 @@ import type { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-exec
 import { OrderExecutor } from "../order/order.executor.js";
 import { decomposeSymbol } from "@opentrader/tools";
 import { canClearRef, shouldCancelOnStop } from "../stop-policy.js";
-import { allowsEntry, committedCapital, exitPriceForMinProfit, orderNotional, toBotLimits, withBotEntryLock } from "../bot-limits.js";
+import {
+  allowsEntry,
+  clearRefusal,
+  committedCapital,
+  exitPriceForMinProfit,
+  orderNotional,
+  shouldLogRefusal,
+  toBotLimits,
+  withBotEntryLock,
+} from "../bot-limits.js";
 import { evaluateTrailing, type TrailingState } from "../../../trailing-policy.js";
 
 export class TradeExecutor implements ISmartTradeExecutor {
@@ -110,7 +119,9 @@ export class TradeExecutor implements ISmartTradeExecutor {
           const committed = committedCapital(trades, entryOrder.id);
           const decision = allowsEntry(limits, committed, orderNotional(entryOrder));
           if (!decision.allowed) {
-            logger.info(`[TradeExecutor] Skipped entry for [ST - ${this.smartTrade.ref}]: ${decision.reason}`);
+            if (shouldLogRefusal(this.smartTrade.botId ?? -1, decision.reason ?? "")) {
+              logger.info(`[TradeExecutor] Skipped entry for [ST - ${this.smartTrade.ref}]: ${decision.reason}`);
+            }
 
             return false;
           }
@@ -119,6 +130,7 @@ export class TradeExecutor implements ISmartTradeExecutor {
         const orderExecutor = new OrderExecutor(entryOrder, this.exchange, this.smartTrade.symbol);
         await orderExecutor.place();
         await this.pull();
+        clearRefusal(this.smartTrade.botId ?? -1);
 
         const quoteLogValue = entryOrder.price ? entryOrder.quantity * entryOrder.price : "?";
         const priceLogValue = entryOrder.price ? entryOrder.price : "Market";

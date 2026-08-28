@@ -113,6 +113,33 @@ export function allowsEntry(limits: BotLimits, committed: number, notional: numb
   };
 }
 
+/**
+ * Whether this refusal is worth a log line.
+ *
+ * A grid always has more levels than its cap allows, so once the cap engages
+ * every tick refuses the same level for the same reason - 16,866 identical
+ * lines in two minutes, on a fleet of five bots. The signal is the transition
+ * into the refusal and any change in the numbers, not its persistence, so the
+ * reason is remembered per bot and repeats are dropped until it differs.
+ *
+ * Keyed by reason rather than a boolean so a cap that starts biting harder, or
+ * a different level being refused, still reports itself.
+ */
+const lastRefusal = new Map<number, string>();
+
+export function shouldLogRefusal(botId: number, reason: string): boolean {
+  if (lastRefusal.get(botId) === reason) return false;
+
+  lastRefusal.set(botId, reason);
+
+  return true;
+}
+
+/** Forget a bot refusal history once it places again, so the next one reports. */
+export function clearRefusal(botId: number): void {
+  lastRefusal.delete(botId);
+}
+
 // Grid levels can be processed concurrently. Serialize entry checks per bot so
 // two workers cannot both observe the same committed balance and oversubscribe
 // the cap before either order is placed.

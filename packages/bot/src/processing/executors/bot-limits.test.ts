@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   NO_LIMITS,
   allowsEntry,
+  clearRefusal,
   committedCapital,
   exitPriceForMinProfit,
   orderNotional,
   projectedProfit,
+  shouldLogRefusal,
   toBotLimits,
   toLimit,
   withBotEntryLock,
@@ -255,5 +257,46 @@ describe("committedCapital with an order excluded", () => {
     const trades = [{ orders: [entry(1, 1000, 1)] }];
 
     expect(committedCapital(trades, 999)).toBe(1000);
+  });
+});
+
+describe("refusal logging", () => {
+  // Once a cap engages, a grid refuses the same level on every tick. Left alone
+  // that wrote 16,866 identical lines in two minutes across five bots, which
+  // buries everything else and stops being information after the first one.
+  const BOT = 4242;
+
+  it("reports a refusal the first time and then stays quiet", () => {
+    clearRefusal(BOT);
+
+    expect(shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000")).toBe(true);
+    expect(shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000")).toBe(false);
+    expect(shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000")).toBe(false);
+  });
+
+  it("speaks up again when the numbers change", () => {
+    clearRefusal(BOT);
+    shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000");
+
+    expect(shouldLogRefusal(BOT, "capital limit reached: 3020 > 1000")).toBe(true);
+  });
+
+  it("keeps bots separate", () => {
+    clearRefusal(BOT);
+    clearRefusal(BOT + 1);
+    shouldLogRefusal(BOT, "same reason");
+
+    expect(shouldLogRefusal(BOT + 1, "same reason")).toBe(true);
+  });
+
+  it("reports the next refusal after an order goes through", () => {
+    clearRefusal(BOT);
+    shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000");
+
+    // What the executor does once it places: the run of refusals has ended, so
+    // the next one is news again.
+    clearRefusal(BOT);
+
+    expect(shouldLogRefusal(BOT, "capital limit reached: 2013 > 1000")).toBe(true);
   });
 });
