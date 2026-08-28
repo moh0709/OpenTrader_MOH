@@ -36,6 +36,7 @@ export function toBotLimits(bot: { maxCapital?: number | null; minProfit?: numbe
 }
 
 type LimitOrder = {
+  id?: number;
   entityType: string;
   status: string;
   price: number | null;
@@ -59,8 +60,12 @@ const isExit = (o: LimitOrder) => EXIT_TYPES.includes(o.entityType);
  * earmarked by entry orders resting on the book - an order that is about to fill
  * is a commitment, not spare capacity, and ignoring it would let a grid blow
  * straight through its cap the moment the price moved.
+ *
+ * `excludeOrderId` leaves out one order. The caller deciding whether to place an
+ * entry needs it: that entry is already stored as `Idle`, so counting it here and
+ * then adding its notional on top would charge it twice and halve the real cap.
  */
-export function committedCapital(trades: LimitTrade[]): number {
+export function committedCapital(trades: LimitTrade[], excludeOrderId?: number): number {
   let committed = 0;
 
   for (const trade of trades) {
@@ -68,6 +73,7 @@ export function committedCapital(trades: LimitTrade[]): number {
 
     for (const order of trade.orders) {
       if (!isEntry(order)) continue;
+      if (excludeOrderId !== undefined && order.id === excludeOrderId) continue;
 
       if (order.status === "Filled") {
         // Spent, and still held until an exit closes the cycle.
@@ -105,6 +111,28 @@ export function allowsEntry(limits: BotLimits, committed: number, notional: numb
     allowed: false,
     reason: `capital limit reached: ${projected.toFixed(2)} would exceed ${limits.maxCapital.toFixed(2)} (already committed ${committed.toFixed(2)})`,
   };
+}
+
+// Grid levels can be processed concurrently. Serialize entry checks per bot so
+// two workers cannot both observe the same committed balance and oversubscribe
+// the cap before either order is placed.
+const entryLocks = new Map<number, Promise<void>>();
+
+export async function withBotEntryLock<T>(botId: number, work: () => Promise<T>): Promise<T> {
+  const previous = entryLocks.get(botId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  entryLocks.set(botId, queued);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (entryLocks.get(botId) === queued) entryLocks.delete(botId);
+  }
 }
 
 /**

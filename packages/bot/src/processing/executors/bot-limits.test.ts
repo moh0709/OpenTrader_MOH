@@ -8,6 +8,7 @@ import {
   projectedProfit,
   toBotLimits,
   toLimit,
+  withBotEntryLock,
 } from "./bot-limits.js";
 
 const order = (entityType: string, status: string, price: number | null, quantity: number, filledPrice: number | null = null) => ({
@@ -119,6 +120,27 @@ describe("allowsEntry", () => {
     // Blocking on a number we do not have would silently stall the strategy.
     expect(allowsEntry(limits, 499, orderNotional({ price: null, quantity: 5 })).allowed).toBe(true);
   });
+
+  it("serializes concurrent work for one bot", async () => {
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const first = withBotEntryLock(99, async () => {
+      events.push("first-start");
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      events.push("first-end");
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const second = withBotEntryLock(99, async () => {
+      events.push("second");
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(["first-start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-start", "first-end", "second"]);
+  });
 });
 
 describe("exitPriceForMinProfit", () => {
@@ -190,5 +212,48 @@ describe("the grid scenario these limits exist for", () => {
     expect(projectedProfit(65_000, 0.012, 65_020)).toBeCloseTo(0.24, 10);
     expect(projectedProfit(65_000, 0.012, lifted)).toBeCloseTo(1, 10);
     expect(lifted).toBeGreaterThan(65_020);
+  });
+});
+
+describe("committedCapital with an order excluded", () => {
+  // The regression this exists for: by the time the cap is checked, the entry
+  // being decided on has already been written to the database as Idle. Counting
+  // it as committed and then adding its notional again refused every order worth
+  // more than half the cap, which on a live fleet looked like a bot that had
+  // simply stopped trading.
+  const entry = (id: number, price: number, quantity: number) => ({
+    id,
+    entityType: "EntryOrder",
+    status: "Idle",
+    price,
+    filledPrice: null,
+    quantity,
+  });
+
+  it("leaves out the order being decided on", () => {
+    const trades = [{ orders: [entry(1, 1000, 1)] }];
+
+    expect(committedCapital(trades)).toBe(1000);
+    expect(committedCapital(trades, 1)).toBe(0);
+  });
+
+  it("still counts every other resting entry", () => {
+    const trades = [{ orders: [entry(1, 1000, 1)] }, { orders: [entry(2, 250, 2)] }];
+
+    expect(committedCapital(trades, 1)).toBe(500);
+  });
+
+  it("admits an order that exactly fills the cap", () => {
+    const limits = { maxCapital: 1000, minProfit: null };
+    const trades = [{ orders: [entry(1, 1000, 1)] }];
+
+    // Double counting made this 2000 against a 1000 cap, and refused it.
+    expect(allowsEntry(limits, committedCapital(trades, 1), 1000).allowed).toBe(true);
+  });
+
+  it("ignores an id that is not there", () => {
+    const trades = [{ orders: [entry(1, 1000, 1)] }];
+
+    expect(committedCapital(trades, 999)).toBe(1000);
   });
 });
