@@ -17,6 +17,8 @@ import {
   XTakeProfitType,
 } from "@opentrader/types";
 import { nullToUndefined, required } from "../utils/index.js";
+import { bornStatus, claimsUnearnedFill } from "./entry-integrity.js";
+import { logger } from "@opentrader/logger";
 
 export class OrderNormalizer {
   static normalize(order: Order): StrategyOrder {
@@ -50,18 +52,26 @@ export class OrderNormalizer {
     order: StrategyCreateOrder,
     meta: { entityType: XEntityType; symbol: string; exchangeAccountId: number },
   ): Prisma.OrderCreateManySmartTradeInput {
+    // This order has not been near an exchange yet, whatever the strategy asked
+    // for, so it is born Idle with nothing filled in that only a fill can earn.
+    // See entry-integrity.ts for what believing the strategy used to cost.
+    if (claimsUnearnedFill(order.status)) {
+      logger.warn(
+        `[OrderNormalizer] ${meta.entityType} on ${meta.symbol} asked to start as "${order.status}"; ` +
+          `starting it Idle instead. A position is only real once the exchange fills it.`,
+      );
+    }
+
     return {
-      status: order.status,
+      status: bornStatus(),
       type: order.type || OrderType.Limit,
       entityType: meta.entityType,
       price: order.price,
       stopPrice: order.stopPrice,
       relativePrice: order.relativePrice,
-      // The BUY order price with status Filled is introduced by the user,
-      // so we must believe that he bought that asset at a specified price
-      filledPrice: order.status === "Filled" ? order.price : null,
-      filledAt: order.status === "Filled" ? new Date() : null,
-      placedAt: order.status === "Placed" || order.status === "Filled" ? new Date() : null,
+      filledPrice: null,
+      filledAt: null,
+      placedAt: null,
       symbol: meta.symbol,
       side: order.side,
       quantity: order.quantity,
