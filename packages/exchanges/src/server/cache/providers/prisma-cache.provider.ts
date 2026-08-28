@@ -18,14 +18,19 @@ export class PrismaCacheProvider implements ICacheProvider {
     });
 
     if (cachedMarkets) {
-      const endTime = Date.now();
-      const duration = (endTime - startTime) / 1000;
+      // The column is TEXT holding the JSON written by cacheMarkets, so it has
+      // to be parsed back. Returning it raw handed the caller a string wearing
+      // a Dictionary type, and a cache that returns the wrong shape is worse
+      // than no cache at all. Latent so far only because nothing calls
+      // setCacheProvider: the default MemoryCacheProvider is what actually runs.
+      const markets = JSON.parse(cachedMarkets.markets) as Dictionary<Market>;
+      const duration = (Date.now() - startTime) / 1000;
 
       console.info(
-        `PrismaCacheProvider: Fetched ${Object.keys(cachedMarkets).length} markets on ${cacheKey} from cache in ${duration}s`,
+        `PrismaCacheProvider: Fetched ${Object.keys(markets).length} markets on ${cacheKey} from cache in ${duration}s`,
       );
 
-      return cachedMarkets.markets as any as Dictionary<Market>;
+      return markets;
     }
 
     // If not cached, loadMarkets and cache to DB
