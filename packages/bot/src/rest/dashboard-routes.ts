@@ -16,6 +16,7 @@ import { eventBus } from "@opentrader/event-bus";
 import { xprisma } from "@opentrader/db";
 import { findStrandedPositions, recoverPositions } from "../processing/executors/recover-position.js";
 import { previewPurge, purgeBotTrades, setBotLimits } from "../processing/executors/purge-bot.js";
+import { clearUnbackedPositions, findUnbackedPositions } from "../processing/executors/unbacked-position.js";
 import {
   blockedSince,
   createShare,
@@ -200,6 +201,54 @@ function recordProviderOutcome(outcome: { ok: boolean; reason?: string }) {
  * `crit` once something has and it refused: configured is not the same as
  * working, and the page should not claim otherwise.
  */
+/**
+ * Positions the exchange never actually filled.
+ *
+ * An entry is only real if an exchange gave it an order id. A row that reads
+ * `Filled` with no id was written by something that decided a position exists
+ * without buying it, and every number derived from it - cost basis, floating
+ * P&L, the exposure a risk watchdog reads, the committed capital a cap is
+ * compared against - is wrong by that amount.
+ *
+ * `entry-integrity.ts` stops new ones being created. This is the smoke alarm:
+ * if the count is ever non-zero again, some path found its way around the rule,
+ * and no exposure figure on this fleet can be trusted until it is found.
+ */
+async function phantomPositionCheck(): Promise<HealthCheck> {
+  const orders = await xprisma.order.findMany({
+    where: {
+      entityType: { in: ["EntryOrder", "SafetyOrder"] },
+      status: "Filled",
+      exchangeOrderId: null,
+      // Only positions still open. A closed one is a scar in the history rather
+      // than a live risk, and counting those would leave the alarm permanently
+      // red with nothing left to act on.
+      smartTrade: {
+        orders: { none: { entityType: { in: ["TakeProfitOrder", "StopLossOrder"] }, status: "Filled" } },
+      },
+    },
+    select: { quantity: true, price: true, filledPrice: true },
+  });
+
+  const capital = orders.reduce((total, order) => total + (order.filledPrice ?? order.price ?? 0) * order.quantity, 0);
+  const plural = orders.length === 1 ? "entry is" : "entries are";
+
+  return {
+    id: "positions.phantom",
+    group: "Orders",
+    label: "Unbacked positions",
+    status: orders.length === 0 ? "ok" : "crit",
+    value: orders.length === 0 ? "none" : `${orders.length}`,
+    detail:
+      orders.length === 0
+        ? "Every open position was filled by the exchange and can be sold back to it."
+        : `${orders.length} ${plural} marked filled with no exchange order behind them, carrying ` +
+          `${capital.toFixed(2)} of cost basis that was never spent. Exposure, P&L and capital caps are ` +
+          `all wrong by that amount until these are cleared.`,
+    metric: orders.length,
+  };
+}
+
 function aiHealthChecks(): HealthCheck[] {
   const provider = resolveProvider();
   const budget = aiGuards.budget.spent();
@@ -479,7 +528,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
      * provider are visible from this package, and the health report is a list
      * of checks with a worst-wins rollup, so adding to it is additive.
      */
-    const checks = [...report.checks, ...aiHealthChecks()];
+    const checks = [...report.checks, ...aiHealthChecks(), await phantomPositionCheck()];
     const counts: Record<HealthStatus, number> = { ok: 0, warn: 0, crit: 0, unknown: 0 };
     for (const check of checks) counts[check.status] += 1;
 
@@ -507,6 +556,28 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
   });
 
   /** A bot's current limits, for the settings dialog to populate itself. */
+  /**
+   * Positions marked filled that no exchange ever filled.
+   *
+   * Read-only, and the counterpart to the `positions.phantom` health check: the
+   * check says how bad it is, this says exactly which trades and what clearing
+   * them would cancel.
+   */
+  fastify.get("/positions/unbacked", async (request) => {
+    const botId = num((request.query as Record<string, unknown>).botId);
+    const positions = await findUnbackedPositions(OWNER_ID, botId);
+    const clearable = positions.filter((position) => position.blockedReason === null);
+
+    return {
+      total: positions.length,
+      clearable: clearable.length,
+      blocked: positions.length - clearable.length,
+      claimedCapital: positions.reduce((total, position) => total + position.claimedCost, 0),
+      liveExitOrders: positions.reduce((total, position) => total + position.liveExitOrders, 0),
+      positions,
+    };
+  });
+
   fastify.get("/bots/:botId/limits", async (request, reply) => {
     const botId = num((request.params as Record<string, unknown>).botId);
     if (botId === undefined) return reply.code(400).send({ error: "bad_request", message: "botId is required" });
@@ -790,6 +861,58 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     });
 
     return result;
+  });
+
+  /**
+   * Write off positions the exchange never filled.
+   *
+   * Cancels the real exits resting against them first, then corrects the
+   * fabricated entry rows. It refuses any bot that is still running, so the
+   * normal sequence is stop the bot, clear, then start it again.
+   */
+  fastify.post("/actions/position.clearUnbacked", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const botId = num(body.botId);
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) {
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "position.clearUnbacked", target: { botId: botId ?? null }, outcome: "denied", detail: permission.reason });
+
+      return reply.code(403).send({ error: "forbidden", message: permission.reason });
+    }
+
+    const rate = agentAccess.controlLimiter.check(actor.name);
+    if (!rate.allowed) {
+      return reply.code(429).send({ error: "rate_limited", retryAfterMs: rate.retryAfterMs });
+    }
+
+    const results = await clearUnbackedPositions(OWNER_ID, botId);
+    dashboardService.invalidate();
+
+    const cleared = results.filter((result) => result.error === null);
+    const failed = results.filter((result) => result.error !== null);
+    const writtenOff = cleared.reduce((total, result) => total + result.claimedCost, 0);
+    const exitsCancelled = cleared.reduce((total, result) => total + result.exitsCancelled, 0);
+
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "position.clearUnbacked",
+      target: { botId: botId ?? null },
+      outcome: failed.length > 0 && cleared.length === 0 ? "failed" : "allowed",
+      detail: `cleared ${cleared.length}, failed ${failed.length}, wrote off ${writtenOff.toFixed(2)}`,
+    });
+
+    return {
+      ok: failed.length === 0,
+      total: results.length,
+      cleared: cleared.length,
+      failed: failed.length,
+      writtenOffCapital: writtenOff,
+      exitsCancelled,
+      results,
+    };
   });
 
   /**

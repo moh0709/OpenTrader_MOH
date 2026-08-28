@@ -35,8 +35,13 @@ tsconfig.tsbuildinfo
 # Local isolated development worktrees
 .worktrees/
 
-# Build backups created during manual deploys
+# Build backups created during manual deploys. deploy_adaptive_trailing.sh
+# writes pre-/incoming-/outgoing- copies next to the live bundle on every run.
 app/dist.bak-*
+app/dist.incoming-*
+app/dist.outgoing-*
+app/dist.prebuild*
+app/dist.pre-adaptive-trailing-*
 *.bak-*
 # Stray empty DB created by running the CLI from the repo root
 /opentrader.db
