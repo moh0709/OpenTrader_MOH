@@ -17,6 +17,7 @@ import { EventEmitter } from "node:events";
 import { MarketsStream } from "./streams/markets.stream.js";
 import { OrderEvent, OrdersStream } from "./streams/orders.stream.js";
 import { BotManager } from "./bot.manager.js";
+import { canClearRef } from "./processing/executors/stop-policy.js";
 import { TradeManager } from "./trade.manager.js";
 
 export class Platform {
@@ -147,22 +148,42 @@ export class Platform {
 
   /**
    * Cleans up trades left in an inconsistent state, e.g. from unexpected bot shutdowns.
+   *
+   * A `ref` is how a bot re-adopts its own trades on the next run, so it may only
+   * be cleared once the trade holds nothing. Clearing it on a trade that still
+   * owns inventory detaches that position for good: the bot cannot find it again,
+   * and a grid rebuilds the level from scratch - synthesising a fresh filled entry
+   * while the old position rests forever. Exposure then grows by a whole ladder on
+   * every restart, which no capital cap can catch, because those entries are never
+   * placed through an executor.
+   *
+   * `canClearRef` is the same rule a bot already applies when it stops. Startup
+   * must not undo it.
    */
   async cleanOrphanedTrades() {
-    const tradesCount = await xprisma.smartTrade.count({
+    const candidates = await xprisma.smartTrade.findMany({
       where: { ref: { not: null } },
+      include: { orders: true },
     });
 
-    if (tradesCount > 0) {
+    const detachable = candidates.filter((trade) => canClearRef(trade.orders));
+    const heldCount = candidates.length - detachable.length;
+
+    if (detachable.length > 0) {
       logger.warn(
-        `Found ${tradesCount} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
+        `Found ${detachable.length} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
       );
+
       const result = await xprisma.smartTrade.updateMany({
-        where: { ref: { not: null } },
+        where: { id: { in: detachable.map((trade) => trade.id) } },
         data: { ref: null },
       });
 
       logger.info(`Cleaned up ${result.count} orphaned trades.`);
+    }
+
+    if (heldCount > 0) {
+      logger.info(`Kept the ref of ${heldCount} trade(s) still holding a position, so their bots re-adopt them.`);
     }
   }
 
