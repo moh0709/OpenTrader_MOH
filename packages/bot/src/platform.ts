@@ -17,6 +17,7 @@ import { EventEmitter } from "node:events";
 import { MarketsStream } from "./streams/markets.stream.js";
 import { OrderEvent, OrdersStream } from "./streams/orders.stream.js";
 import { BotManager } from "./bot.manager.js";
+import { canClearRef } from "./processing/executors/stop-policy.js";
 import { TradeManager } from "./trade.manager.js";
 
 export class Platform {
@@ -148,39 +149,51 @@ export class Platform {
   /**
    * Cleans up trades left in an inconsistent state, e.g. from unexpected bot shutdowns.
    *
-   * A strategy's `ref` is a key into a map that only exists while its bot is
-   * running, so a ref surviving a restart is a dangling pointer and clearing it
-   * is right.
+   * Two separate reasons a ref must survive, and a trade only loses one if
+   * neither applies.
    *
-   * The `manual:` and `auto:` lanes are the exception, and clearing theirs was
-   * a real bug. Those refs are not pointers into anything — they are the record
-   * of which lane opened a deal, and both lanes count their daily budget by
-   * reading them back. Wiping them on every boot handed whichever lane had been
-   * busy a fresh allowance, and left the trading head unable to find the
-   * positions it was supposed to be managing.
+   * **It still holds something.** A `ref` is how a bot re-adopts its own trades
+   * on the next run. Clearing it on a trade that still owns inventory detaches
+   * that position for good: the bot cannot find it again, and a grid rebuilds
+   * the level from scratch — synthesising a fresh filled entry while the old
+   * position rests forever. Exposure then grows by a whole ladder on every
+   * restart, which no capital cap can catch, because those entries are never
+   * placed through an executor. `canClearRef` is the same rule a bot already
+   * applies when it stops, and startup must not undo it.
+   *
+   * **It is a lane tag, not a pointer.** A `manual:` or `auto:` ref does not
+   * point into a bot's ref map at all — it records which lane opened the deal,
+   * and both lanes read it back afterwards: the manual budget counts today's
+   * entries by it, and the trading head reconstructs its whole book from it,
+   * closed cycles included. Those are the rows that decide whether the head has
+   * hit its daily loss limit, so clearing them on a closed deal would hand it a
+   * clean slate every restart.
    */
   async cleanOrphanedTrades() {
-    const orphaned = (await xprisma.smartTrade.findMany({
+    const candidates = await xprisma.smartTrade.findMany({
       where: { ref: { not: null } },
-      select: { id: true, ref: true },
-    })) as { id: number; ref: string | null }[];
+      include: { orders: true },
+    });
 
-    const strandedStrategyRefs = orphaned.filter((trade) => !isExternalRef(trade.ref));
+    const detachable = candidates.filter((trade) => !isExternalRef(trade.ref) && canClearRef(trade.orders));
+    const keptCount = candidates.length - detachable.length;
 
-    if (strandedStrategyRefs.length > 0) {
+    if (detachable.length > 0) {
       logger.warn(
-        `Found ${strandedStrategyRefs.length} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
+        `Found ${detachable.length} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
       );
+
       const result = await xprisma.smartTrade.updateMany({
-        where: { id: { in: strandedStrategyRefs.map((trade) => trade.id) } },
+        where: { id: { in: detachable.map((trade) => trade.id) } },
         data: { ref: null },
       });
 
       logger.info(`Cleaned up ${result.count} orphaned trades.`);
     }
 
-    const kept = orphaned.length - strandedStrategyRefs.length;
-    if (kept > 0) logger.info(`Kept the lane tag on ${kept} manual or autopilot deals.`);
+    if (keptCount > 0) {
+      logger.info(`Kept the ref of ${keptCount} trade(s) still holding a position or tagged to a lane.`);
+    }
   }
 
   /**

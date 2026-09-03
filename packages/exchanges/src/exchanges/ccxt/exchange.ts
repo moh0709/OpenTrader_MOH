@@ -51,7 +51,7 @@ import type {
   ITrade,
 } from "@opentrader/types";
 import { pro, exchanges } from "ccxt";
-import type { Market, Exchange } from "ccxt";
+import type { Dictionary, Market, Exchange } from "ccxt";
 import type { IExchange, IExchangeCredentials } from "../../types/index.js";
 import { cache } from "../../cache.js";
 import { fetcher } from "../../utils/next/fetcher.js";
@@ -63,6 +63,9 @@ export class CCXTExchange implements IExchange {
   public isDemo = false;
   public exchangeCode: ExchangeCode;
   public ccxt: Exchange;
+
+  /** One shared attempt at priming market metadata. See ensureMarkets(). */
+  private marketsPrimed: Promise<void> | null = null;
 
   // Polling requests for exchanges that does not support sockets
   private tickerRequest: Record<string, Promise<ITicker> | null> = {};
@@ -94,6 +97,11 @@ export class CCXTExchange implements IExchange {
     this.ccxt.FetchError = TypeError; // when fetch request failed (network error)
     this.ccxt.AbortError = DOMException; // when fetch request aborted
     this.ccxt.verbose = process.env.CCXT_VERBOSE === "true";
+    // The ccxt default is 10s, which is generous for a quote and tight for the
+    // full instrument list: 1.5 MB on OKX, and the parse lands on an event loop
+    // already busy with strategy ticks. Timing that out is what kept the market
+    // cache empty, so every retry paid for the same download again.
+    this.ccxt.timeout = Number(process.env.EXCHANGE_TIMEOUT_MS) || 30_000;
 
     if (this.isDemo) {
       this.ccxt.setSandboxMode(true);
@@ -107,6 +115,38 @@ export class CCXTExchange implements IExchange {
   async loadMarkets(): Promise<Record<string, Market>> {
     const cacheProvider = cache.getCacheProvider();
     return cacheProvider.getMarkets(this);
+  }
+
+  /**
+   * Hand ccxt its market metadata before it goes looking for it itself.
+   *
+   * Any ccxt call that resolves a symbol loads markets first, and it does that
+   * itself, over the network, ignoring the cache this class wraps `loadMarkets`
+   * in. On OKX that is a 1.5 MB instrument list, and the dashboard refreshes
+   * several symbols on a timer: each one raced the others for the same download,
+   * none finished inside the old 10s timeout, so none of them ever populated
+   * ccxt's markets and the next tick paid for it all again. Observed as every
+   * OKX symbol reporting itself unpriceable, indefinitely, while quotes over the
+   * websocket kept arriving perfectly.
+   *
+   * Priming through `loadMarkets` breaks the loop, because that path is cached.
+   * The promise is shared, so concurrent callers make one attempt between them
+   * instead of one each, and it is cleared on failure so a later call may try
+   * again rather than inheriting the error for the life of the process.
+   */
+  private ensureMarkets(): Promise<void> {
+    if (!this.marketsPrimed) {
+      this.marketsPrimed = this.loadMarkets()
+        .then((markets) => {
+          this.ccxt.setMarkets(markets as Dictionary<Market>);
+        })
+        .catch((err) => {
+          this.marketsPrimed = null;
+          throw err;
+        });
+    }
+
+    return this.marketsPrimed;
   }
 
   async accountAssets(): Promise<IAccountAsset[]> {
@@ -185,6 +225,7 @@ export class CCXTExchange implements IExchange {
   }
 
   async getTicker(symbol: string): Promise<ITicker> {
+    await this.ensureMarkets();
     const args = normalize.getTicker.request(symbol);
     const data = await this.ccxt.fetchTicker(...args);
 
@@ -192,6 +233,7 @@ export class CCXTExchange implements IExchange {
   }
 
   async getMarketPrice(params: IGetMarketPriceRequest): Promise<IGetMarketPriceResponse> {
+    await this.ensureMarkets();
     const args = normalize.getMarketPrice.request(params);
     const data = await this.ccxt.fetchTicker(...args);
 
@@ -199,6 +241,7 @@ export class CCXTExchange implements IExchange {
   }
 
   async getCandlesticks(params: IGetCandlesticksRequest): Promise<ICandlestick[]> {
+    await this.ensureMarkets();
     const args = normalize.getCandlesticks.request(params);
     const data = await this.ccxt.fetchOHLCV(...args);
 

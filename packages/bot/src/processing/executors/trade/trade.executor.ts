@@ -8,7 +8,16 @@ import type { ISmartTradeExecutor, SmartTradeContext } from "../smart-trade-exec
 import { OrderExecutor } from "../order/order.executor.js";
 import { decomposeSymbol } from "@opentrader/tools";
 import { canClearRef, shouldCancelOnStop } from "../stop-policy.js";
-import { allowsEntry, committedCapital, exitPriceForMinProfit, orderNotional, toBotLimits } from "../bot-limits.js";
+import {
+  allowsEntry,
+  clearRefusal,
+  committedCapital,
+  exitPriceForMinProfit,
+  orderNotional,
+  shouldLogRefusal,
+  toBotLimits,
+  withBotEntryLock,
+} from "../bot-limits.js";
 import { evaluateTrailing, type TrailingState } from "../../../trailing-policy.js";
 
 export class TradeExecutor implements ISmartTradeExecutor {
@@ -93,36 +102,44 @@ export class TradeExecutor implements ISmartTradeExecutor {
     const { baseCurrency, quoteCurrency } = decomposeSymbol(this.smartTrade.symbol);
 
     if (entryOrder.status === "Idle") {
-      // A grid will place an entry on every level it has, which is usually far
-      // more money than intended. The cap is checked here, at the moment capital
-      // would actually be committed, rather than trusted to the strategy.
-      const limits = await this.botLimits();
+      return withBotEntryLock(this.smartTrade.botId ?? -1, async () => {
+        // A grid will place an entry on every level it has, which is usually far
+        // more money than intended to expose. The cap is checked while holding a
+        // per-bot lock, so concurrent grid workers cannot bypass it.
+        const limits = await this.botLimits();
 
-      if (limits.maxCapital !== null) {
-        const trades = await xprisma.smartTrade.findMany({
-          where: { botId: this.smartTrade.botId ?? undefined },
-          include: { orders: true },
-        });
+        if (limits.maxCapital !== null) {
+          const trades = await xprisma.smartTrade.findMany({
+            where: { botId: this.smartTrade.botId ?? undefined },
+            include: { orders: true },
+          });
 
-        const decision = allowsEntry(limits, committedCapital(trades), orderNotional(entryOrder));
-        if (!decision.allowed) {
-          logger.info(`[TradeExecutor] Skipped entry for [ST - ${this.smartTrade.ref}]: ${decision.reason}`);
+          // Exclude this entry: it is already stored as Idle, so leaving it in
+          // would count it once as committed and again as the order being added.
+          const committed = committedCapital(trades, entryOrder.id);
+          const decision = allowsEntry(limits, committed, orderNotional(entryOrder));
+          if (!decision.allowed) {
+            if (shouldLogRefusal(this.smartTrade.botId ?? -1, decision.reason ?? "")) {
+              logger.info(`[TradeExecutor] Skipped entry for [ST - ${this.smartTrade.ref}]: ${decision.reason}`);
+            }
 
-          return false;
+            return false;
+          }
         }
-      }
 
-      const orderExecutor = new OrderExecutor(entryOrder, this.exchange, this.smartTrade.symbol);
-      await orderExecutor.place();
-      await this.pull();
+        const orderExecutor = new OrderExecutor(entryOrder, this.exchange, this.smartTrade.symbol);
+        await orderExecutor.place();
+        await this.pull();
+        clearRefusal(this.smartTrade.botId ?? -1);
 
-      const quoteLogValue = entryOrder.price ? entryOrder.quantity * entryOrder.price : "?";
-      const priceLogValue = entryOrder.price ? entryOrder.price : "Market";
-      logger.info(
-        `[TradeExecutor] Placed entry ${entryOrder.side} ${entryOrder.quantity} ${baseCurrency} for ${quoteLogValue} ${quoteCurrency} at ${priceLogValue}`,
-      );
+        const quoteLogValue = entryOrder.price ? entryOrder.quantity * entryOrder.price : "?";
+        const priceLogValue = entryOrder.price ? entryOrder.price : "Market";
+        logger.info(
+          `[TradeExecutor] Placed entry ${entryOrder.side} ${entryOrder.quantity} ${baseCurrency} for ${quoteLogValue} ${quoteCurrency} at ${priceLogValue}`,
+        );
 
-      return true;
+        return true;
+      });
     } else if (entryOrder.status === "Filled" && takeProfitOrder?.status === "Idle") {
       // Grid spacing is set in price, so a tight grid on a small quantity can
       // close for fractions of a cent. Lift the exit to the price that actually

@@ -110,3 +110,31 @@ describe("the stranding scenario end to end", () => {
     expect(canClearRef(orders)).toBe(true);
   });
 });
+
+describe("startup cleanup of orphaned refs", () => {
+  // Platform.cleanOrphanedTrades used to null the ref of EVERY trade that had
+  // one, which undid canClearRef the moment the daemon restarted. A grid then
+  // could not re-adopt its own levels, rebuilt them from scratch, and synthesised
+  // a fresh filled entry per level - exposure grew by a ladder per restart and no
+  // capital cap could see it, because those entries never pass through an
+  // executor. This models the selection the platform now makes.
+  const detachable = (trades: { orders: { entityType: string; status: string }[] }[]) =>
+    trades.filter((trade) => canClearRef(trade.orders));
+
+  it("detaches only the trades that hold nothing", () => {
+    const trades = [
+      { orders: waitingToBuy },
+      { orders: holding },
+      { orders: completed },
+      { orders: dcaHolding },
+    ];
+
+    expect(detachable(trades)).toEqual([{ orders: waitingToBuy }, { orders: completed }]);
+  });
+
+  it("leaves a fleet of held positions entirely alone", () => {
+    const trades = [{ orders: holding }, { orders: dcaHolding }];
+
+    expect(detachable(trades)).toHaveLength(0);
+  });
+});
