@@ -159,7 +159,7 @@ export async function loadAutopilotPolicy(): Promise<AutopilotConfig | null> {
 }
 
 /** What an operator is allowed to change, and the bounds it is clamped into. */
-const NUMERIC_BOUNDS: Record<string, { min: number; max: number }> = {
+export const NUMERIC_BOUNDS: Record<string, { min: number; max: number }> = {
   intervalSec: { min: 10, max: 86_400 },
   equityQuote: { min: 0, max: 10_000_000 },
   maxPositionQuote: { min: 1, max: 100_000 },
@@ -174,9 +174,17 @@ const NUMERIC_BOUNDS: Record<string, { min: number; max: number }> = {
   stopLossPercent: { min: 0.1, max: 100 },
   trailStartPercent: { min: 0.1, max: 100 },
   trailGivebackPercent: { min: 0.05, max: 100 },
-  minHoldMs: { min: 0, max: 30 * 86_400_000 },
-  cooldownMs: { min: 0, max: 30 * 86_400_000 },
-  maxHoldMs: { min: 60_000, max: 365 * 86_400_000 },
+  /*
+   * These three are stored in `Int` columns, and Prisma's `Int` is 32-bit
+   * however roomy SQLite's own integers are. 30 days in milliseconds is
+   * 2,592,000,000 — past the 2,147,483,647 ceiling — so the old bounds let a
+   * clamp produce a value the write then threw on. Capped just under the limit
+   * instead, which is a little over 23 days and far longer than any of these
+   * has a sensible reason to be.
+   */
+  minHoldMs: { min: 0, max: 2_000_000_000 },
+  cooldownMs: { min: 0, max: 2_000_000_000 },
+  maxHoldMs: { min: 60_000, max: 2_000_000_000 },
   roundTripFeeBps: { min: 0, max: 500 },
 };
 

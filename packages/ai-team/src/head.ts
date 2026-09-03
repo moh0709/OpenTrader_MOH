@@ -81,6 +81,17 @@ export type OpenPosition = {
   peakPrice: number;
   /** Price of the resting take profit, when one is working. */
   takeProfitPrice: number | null;
+  /**
+   * When the head last asked for this position to be closed, and how.
+   *
+   * The loop re-decides every minute, but an exit takes longer than that to
+   * fill. Without this the head would look at a position it had already told
+   * the exchange to sell, conclude it was still holding a loser, and ask again
+   * — cancelling its own working exit and replacing it, once a minute, for as
+   * long as the fill took. Null means no exit has been asked for.
+   */
+  exitRequestedAt: number | null;
+  exitRequestedAction: HeadAction | null;
 };
 
 /**
@@ -296,6 +307,31 @@ export function planPosition(
   const stand = (reason: string): HeadPlan =>
     plan({ symbol, action: "hold", reason, notes, confidence: verdict.confidence, netPnlQuote: pnl });
 
+  /*
+   * Is an exit already working?
+   *
+   * `cooldownMs` doubles as the window here rather than earning its own knob:
+   * it is already the operator's answer to "how long should the desk leave a
+   * decision alone before revisiting it", and an exit is a decision.
+   *
+   * One escalation is allowed through. A patient limit exit resting at a profit
+   * target may never fill, and if the market collapses through the stop while
+   * it sits there, waiting out the window is exactly the wrong thing. So an
+   * urgent exit may override a patient one — but never another urgent one,
+   * which is what bounds this to a single retry rather than a loop.
+   */
+  const exitAge = held?.exitRequestedAt === null || held?.exitRequestedAt === undefined ? null : now - held.exitRequestedAt;
+  const exitInFlight = exitAge !== null && exitAge >= 0 && exitAge < limits.cooldownMs;
+  const lastExitWasUrgent = held?.exitRequestedAction === "stop_out" || held?.exitRequestedAction === "flatten";
+
+  /** True when we may ask again despite an exit being in flight. */
+  const mayEscalate = (): boolean => exitInFlight && !lastExitWasUrgent;
+
+  const holdingForFill = (): HeadPlan =>
+    stand(
+      `An exit is already working on ${symbol} (asked ${((exitAge ?? 0) / 60_000).toFixed(0)} min ago); leaving it to fill.`,
+    );
+
   // --- Portfolio halts ------------------------------------------------------
   //
   // A tripped loss limit does not merely stop new trades. Whatever is already
@@ -312,7 +348,13 @@ export function planPosition(
 
     notes.push(reason);
 
-    if (held) return exit("flatten", `${reason}. Closing ${symbol} and standing down for the day.`);
+    if (held) {
+      // A flatten is urgent, so it may escalate a patient exit — but if the
+      // last request was already urgent, asking again only churns orders.
+      if (exitInFlight && lastExitWasUrgent) return holdingForFill();
+
+      return exit("flatten", `${reason}. Closing ${symbol} and standing down for the day.`);
+    }
 
     return stand(`${reason}. Not opening anything else today.`);
   }
@@ -334,11 +376,18 @@ export function planPosition(
     // hold time. A position that gaps through its stop in the first minute is
     // the one case where waiting costs the most.
     if (pnlPercent! <= -limits.stopLossPercent) {
+      if (exitInFlight && !mayEscalate()) return holdingForFill();
+
       return exit(
         "stop_out",
         `Stopped out of ${symbol} at ${pnlPercent!.toFixed(2)}%, past the ${limits.stopLossPercent}% limit.`,
       );
     }
+
+    // Everything below this line is a discretionary exit — a target reached, a
+    // trail given back, a view changed. None of them is urgent enough to
+    // replace an order that is already working.
+    if (exitInFlight) return holdingForFill();
 
     // Take profit is unconditional on the council. The trade made what it was
     // asked to make; asking the committee whether to keep going is how a

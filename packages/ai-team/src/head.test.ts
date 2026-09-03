@@ -62,6 +62,8 @@ function position(overrides: Partial<OpenPosition> = {}): OpenPosition {
     openedAt: NOW - 2 * HOUR,
     peakPrice: 100,
     takeProfitPrice: null,
+    exitRequestedAt: null,
+    exitRequestedAction: null,
     ...overrides,
   };
 }
@@ -397,5 +399,74 @@ describe("netProfitPercent", () => {
 
   it("reports zero rather than dividing by nothing on an empty position", () => {
     expect(netProfitPercent(position({ quantity: 0, entryPrice: 0 }), 100, 55)).toBe(0);
+  });
+});
+
+/**
+ * The head re-decides every minute; an exit takes longer than that to fill.
+ *
+ * Without this guard it would look at a position it had already told the
+ * exchange to sell, conclude it was still holding a loser, and ask again —
+ * cancelling its own working exit and replacing it, once a minute, for as long
+ * as the fill took.
+ */
+describe("planPosition — an exit already working", () => {
+  const working = (action: OpenPosition["exitRequestedAction"], minutesAgo: number) =>
+    position({ exitRequestedAt: NOW - minutesAgo * 60_000, exitRequestedAction: action });
+
+  it("does not re-ask for a take profit it already requested", () => {
+    const plan = planPosition(
+      snapshot({ price: 102 }),
+      verdict(),
+      working("take_profit", 1),
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
+
+    expect(plan.action).toBe("hold");
+    expect(plan.reason).toMatch(/already working/);
+  });
+
+  it("does not re-ask for a stop it already requested", () => {
+    const plan = planPosition(snapshot({ price: 97 }), verdict(), working("stop_out", 1), FREE, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("hold");
+  });
+
+  it("escalates a resting take profit to a stop when the market collapses", () => {
+    // A patient limit exit at a profit target may never fill. Waiting out the
+    // window while the position runs through its stop is the one case where
+    // asking again is right.
+    const plan = planPosition(snapshot({ price: 97 }), verdict(), working("take_profit", 1), FREE, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("stop_out");
+  });
+
+  it("escalates only once — a stop already asked for is never re-sent", () => {
+    const escalated = planPosition(snapshot({ price: 95 }), verdict(), working("stop_out", 2), FREE, portfolio({ openPositions: 1 }), NOW);
+
+    expect(escalated.action).toBe("hold");
+  });
+
+  it("does not re-flatten a book it is already flattening", () => {
+    const broke = portfolio({ realizedPnlToday: -100, openPositions: 1 });
+    const plan = planPosition(snapshot(), verdict(), working("flatten", 1), FREE, broke, NOW);
+
+    expect(plan.action).toBe("hold");
+  });
+
+  it("flattens over a patient exit, because a halt is urgent", () => {
+    const broke = portfolio({ realizedPnlToday: -100, openPositions: 1 });
+    const plan = planPosition(snapshot(), verdict(), working("take_profit", 1), FREE, broke, NOW);
+
+    expect(plan.action).toBe("flatten");
+  });
+
+  it("tries again once the window has passed and the exit clearly did not fill", () => {
+    const stale = working("stop_out", FREE.cooldownMs / 60_000 + 1);
+    const plan = planPosition(snapshot({ price: 97 }), verdict(), stale, FREE, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("stop_out");
   });
 });

@@ -4,7 +4,6 @@ import {
   convene,
   describeHeadPlan,
   isEntry,
-  isExit,
   llmConfigFromEnv,
   planPosition,
   recordAiAction,
@@ -97,7 +96,13 @@ export type SymbolOutcome = {
   failure?: string;
   /** Notional committed, for an entry that went through. */
   sizeQuote?: number;
-  /** Notional released, for an exit that went through. */
+  /**
+   * Notional the exit will release once it fills.
+   *
+   * Reported, not spent: the running book deliberately does not credit this
+   * back mid-pass, because the order is still working and the inventory is
+   * still ours. It is here so the caller can see the size of what was let go.
+   */
   exposureFreed?: number;
 };
 
@@ -245,7 +250,7 @@ export class TradingHead {
 
     const exchange = exchangeProvider.fromAccount(bot.exchangeAccount as never);
 
-    const [intel, convictions, positions, book, openedToday] = await Promise.all([
+    const [intel, convictions, positions, book, openedAtPassStart] = await Promise.all([
       this.desk.gather(config.symbols),
       mirroredConvictions(config.symbols),
       loadOpenPositions(config.botId),
@@ -255,6 +260,7 @@ export class TradingHead {
 
     const outcomes: SymbolOutcome[] = [];
     let executed = 0;
+    let spentToday = openedAtPassStart;
 
     // Sequential, not parallel. Each decision changes the exposure the next one
     // is allowed to take, and two symbols sizing against the same headroom at
@@ -273,7 +279,7 @@ export class TradingHead {
             openExposureQuote: book.openExposureQuote,
             realizedPnlToday: book.realizedPnlToday,
             consecutiveLosses: book.consecutiveLosses,
-            openedNotionalToday: openedToday,
+            openedNotionalToday: spentToday,
           },
         });
 
@@ -283,19 +289,32 @@ export class TradingHead {
           executed += 1;
 
           // Keep the running book honest within the pass, so the next symbol
-          // sizes against what this one just committed.
+          // sizes against what this one just committed. The daily budget has to
+          // fall here too: it is read from the journal once per pass, so
+          // without this every symbol in one pass would size against the same
+          // untouched allowance and the day's limit could be spent several
+          // times over in a single minute.
           if (isEntry(outcome.action)) {
             book.openPositions += 1;
             book.openExposureQuote += outcome.sizeQuote ?? 0;
-          } else if (isExit(outcome.action)) {
-            book.openPositions = Math.max(0, book.openPositions - 1);
-            book.openExposureQuote = Math.max(0, book.openExposureQuote - (outcome.exposureFreed ?? 0));
+            spentToday += outcome.sizeQuote ?? 0;
           }
+
+          /*
+           * An exit deliberately does not give the headroom back here.
+           *
+           * Asking to sell is not selling: the order is working and the
+           * inventory is still ours until it fills. Crediting the exposure back
+           * in the same pass would let a later symbol size against room that
+           * does not exist yet — an error in the one direction the limits exist
+           * to prevent. The next pass reads the book from the orders and finds
+           * the truth, which costs at most one interval of caution.
+           */
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.warn(`[Head] ${symbol} could not be considered: ${message}`);
-        outcomes.push({ symbol, action: "hold", executed: false, reason: `Could not read ${symbol}`, failure: message });
+        outcomes.push({ symbol, action: "hold", executed: false, reason: `${symbol} could not be decided: ${message}`, failure: message });
       }
     }
 
@@ -346,15 +365,31 @@ export class TradingHead {
     /*
      * The council votes on direction only.
      *
-     * Its own risk analyst is given limits that cannot veto — the head's
-     * planner enforces the real ones immediately afterwards, and letting both
-     * layers halt would mean a tripped budget was reported as "the council saw
-     * nothing", which is not what happened and not what an operator needs to
-     * read.
+     * Every portfolio-derived veto is lifted here, and that is a fix rather
+     * than a convenience. The council's risk analyst compares exposure against
+     * whichever limits it is handed, and it was being handed
+     * `DEFAULT_RISK_LIMITS` — a 500-quote cap belonging to the Hybrid strategy
+     * and to nothing on this desk. A head running past that figure had every
+     * verdict on every symbol vetoed, including the ones that would have closed
+     * the positions causing it.
+     *
+     * The head's own planner enforces the real limits immediately afterwards,
+     * from the operator's policy. Letting both layers halt would also mean a
+     * tripped budget reached the journal as "the council saw nothing", which is
+     * not what happened and not what an operator needs to read.
+     *
+     * The volatility veto is deliberately left in place: it is a judgement
+     * about the market, which is exactly what the council is for.
      */
     const verdict: CouncilVerdict = await convene(
       snapshot,
-      { ...DEFAULT_RISK_LIMITS, maxDailyLossQuote: Number.MAX_SAFE_INTEGER, maxConsecutiveLosses: Number.MAX_SAFE_INTEGER },
+      {
+        ...DEFAULT_RISK_LIMITS,
+        maxDailyLossQuote: Number.MAX_SAFE_INTEGER,
+        maxConsecutiveLosses: Number.MAX_SAFE_INTEGER,
+        maxTotalExposureQuote: Number.MAX_SAFE_INTEGER,
+        killSwitch: false,
+      },
       {
         openExposureQuote: book.openExposureQuote,
         realizedPnlToday: 0,
@@ -406,7 +441,7 @@ export class TradingHead {
       return { symbol, action: plan.action, executed: false, reason: `Observing only: ${plan.reason}` };
     }
 
-    const execution = await this.execute(plan, config);
+    const execution = await this.execute(plan, config, price);
 
     await recordDecision({
       plan,
@@ -434,8 +469,27 @@ export class TradingHead {
   private async execute(
     plan: HeadPlan,
     config: AutopilotConfig,
+    /** The price the decision was made at, used to price the resting exit. */
+    price: number,
   ): Promise<{ ok: boolean; smartTradeId: number | null; message: string }> {
     if (isEntry(plan.action)) {
+      /*
+       * Every entry leaves a resting take profit behind it.
+       *
+       * The head manages its own exits minute by minute and would close this
+       * at the same net target anyway, so the resting order is not what makes
+       * the profit — it is what makes the position survivable if the daemon
+       * is not there. A filled entry with nothing to sell it is precisely the
+       * stranded-position failure this fork exists to fix, and opening one on
+       * purpose every time the head trades would have been indefensible.
+       *
+       * Priced at the same place the planner takes profit: the target plus the
+       * round trip's fees, so the resting fill clears the same net figure.
+       * Whichever fires first is correct, and `closeSmartTrade` cancels this
+       * one before placing a market exit, so they cannot both sell.
+       */
+      const target = price * (1 + (config.limits.takeProfitPercent + config.limits.roundTripFeeBps / 100) / 100);
+
       const result = await openSmartTrade(
         {
           botId: config.botId!,
@@ -443,6 +497,7 @@ export class TradingHead {
           side: "buy",
           quoteAmount: plan.sizeQuote,
           orderType: "market",
+          takeProfitPrice: Number(target.toFixed(8)),
         },
         doorLimits(config),
         AUTOPILOT_REF_PREFIX,

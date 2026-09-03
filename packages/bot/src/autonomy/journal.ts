@@ -118,6 +118,35 @@ export async function openedNotionalToday(now = Date.now()): Promise<number> {
   }
 }
 
+/**
+ * The last exit the head asked for on a given deal, if any.
+ *
+ * Read back rather than remembered because the loop restarts and an exit does
+ * not: a position whose sell is still working must look the same to a daemon
+ * that has been up for a week and one that came up ten seconds ago.
+ */
+export async function lastExitRequest(
+  smartTradeId: number,
+): Promise<{ at: number; action: string } | null> {
+  try {
+    const row = (await xprisma.autopilotJournal.findFirst({
+      where: {
+        smartTradeId,
+        executed: true,
+        action: { in: ["take_profit", "trail_exit", "stop_out", "close", "flatten"] },
+      },
+      orderBy: { at: "desc" },
+      select: { at: true, action: true },
+    })) as { at: bigint; action: string } | null;
+
+    return row ? { at: Number(row.at), action: row.action } : null;
+  } catch (error) {
+    warnOnce(error, "Could not read the autopilot journal");
+
+    return null;
+  }
+}
+
 export type JournalRow = {
   id: number;
   at: number;

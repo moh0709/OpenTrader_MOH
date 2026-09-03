@@ -141,6 +141,15 @@ between passes. A peak held in memory is wrong after every restart, and one held
 in a column is another thing to keep consistent with the exchange. It can never
 be below the entry price, so a trail cannot fire on a position that only lost.
 
+**Every entry leaves a resting take profit behind it**, priced at the same net
+target the planner would close at. The head would take that profit itself minute
+by minute, so the resting order is not what earns it — it is what makes the
+position survivable if the daemon is not there. A filled entry with nothing to
+sell it is exactly the stranded-position failure this fork exists to fix, and
+opening one on purpose every time the head traded would have been indefensible.
+`closeSmartTrade` cancels it before placing a market exit, so the two can never
+both sell.
+
 ---
 
 ## Timing: why it mostly does nothing
@@ -160,6 +169,14 @@ than trading because it was asked to decide:
 - **Outside veto**: an entry into a market that a broad, aligned, multi-timeframe
   external read calls a sell is refused outright, whatever the vote was.
   Corroboration is optional; contradiction is disqualifying.
+- **An exit already working is left alone.** The head re-decides every minute and
+  a sell takes longer than that to fill, so without this it would look at a
+  position it had already told the exchange to close, conclude it was still
+  holding a loser, and ask again — cancelling its own working order and
+  replacing it, once a minute, for as long as the fill took. One escalation is
+  allowed through: a patient limit exit resting at a profit target may never
+  fill, so an urgent stop may replace it, but never another urgent one. That
+  bounds it to a single retry rather than a loop.
 
 ### A note on the confidence numbers
 
@@ -273,14 +290,14 @@ not run.
 
 All figures from real runs.
 
-**879 tests pass across the monorepo**, up from 799 before this work — 80 new,
+**888 tests pass across the monorepo**, up from 799 before this work — 89 new,
 none failing. Two pre-existing `@opentrader/bot` executor tests remain skipped;
 they need a live database and are unrelated.
 
-The new coverage: 33 on the position planner (including a property sweep of the
-whole confidence range against a spread of portfolio states), 17 on the three
-outside agents, 18 on the intelligence sources, 12 on the policy reader and the
-high-water mark.
+The new coverage: 40 on the position planner (including a property sweep of the
+whole confidence range against a spread of portfolio states, and seven on the
+exit-already-working guard), 17 on the three outside agents, 18 on the
+intelligence sources, 14 on the policy reader and the high-water mark.
 
 **Live sources**, run 2026-09-04 against the real endpoints
 (`INTEL_LIVE=1 npx vitest run --root packages/market-intel src/live.test.ts`):
@@ -304,21 +321,33 @@ TradingView live:
   — journalled against its `smartTradeId`.
 - Managing a filled position at three different prices: `hold` at −0.39%,
   `take_profit` at +1.85%, `stop_out` at −3.63%.
+- Every entry carried a `TakeProfitOrder Sell Limit` alongside its market entry.
+- Two symbols opening in one pass against a 50-quote daily budget spent 36.96
+  and then exactly 13.04 — the second sized against what the first had just
+  committed, totalling the budget rather than twice it.
+- A position whose exit had just been requested: `take_profit` on the first
+  pass, then `hold — an exit is already working` on the next.
 
 ### What is not verified
 
 1. **No live money has moved through it.** The opener and closer are the same
    code paths that have been exercised in production for manual trades, but the
    head has not itself placed an order at a real exchange.
-2. **No demonstrated alpha.** The framework decides coherently and is risk-gated;
+2. **The stop is enforced by the loop, not by a resting order.** Every entry
+   leaves a resting take profit, so the upside is covered if the daemon stops —
+   but there is no resting stop-loss, and a position is unprotected on the
+   downside for as long as the head is not running. On a host with the health
+   alerter and fleet guard that window is minutes, and positions are capped at
+   `maxPositionQuote`; it is still the sharpest edge here.
+3. **No demonstrated alpha.** The framework decides coherently and is risk-gated;
    whether this agent set makes money is an open question, and the honest answer
    is a month of observe mode on your own markets. The
    [Hybrid Trader paper results](HYBRID-TRADER.md#paper-trading) are the closest
    prior evidence, and they show capital preservation rather than edge.
-3. **Long-only, spot.** There is no short side. A bearish council leads to not
+4. **Long-only, spot.** There is no short side. A bearish council leads to not
    holding, not to being short.
-4. **One position per symbol** is what the exit rules manage. With pyramiding on,
+5. **One position per symbol** is what the exit rules manage. With pyramiding on,
    additional entries are opened but the oldest is the one trailed and stopped.
-5. **TradingView is a public, unauthenticated endpoint** that can change without
+6. **TradingView is a public, unauthenticated endpoint** that can change without
    notice. Every failure resolves to the council voting without it, and
    `src/live.test.ts` is how you find out that it has moved.

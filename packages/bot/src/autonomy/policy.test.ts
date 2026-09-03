@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AUTOPILOT, parseSymbols, toConfig } from "./policy.js";
+import { DEFAULT_AUTOPILOT, NUMERIC_BOUNDS, parseSymbols, toConfig } from "./policy.js";
 
 /**
  * The reader between the database row and the head's standing orders.
@@ -86,5 +86,26 @@ describe("toConfig", () => {
 
   it("keeps a disabled row disabled", () => {
     expect(toConfig(row({ enabled: false })).enabled).toBe(false);
+  });
+});
+
+describe("saveAutopilotPolicy bounds", () => {
+  /**
+   * These three live in `Int` columns, and Prisma's `Int` is 32-bit however
+   * roomy SQLite's own integers are. The bounds used to allow 30 and 365 days
+   * in milliseconds, both past 2,147,483,647 — so a clamp produced a value the
+   * write then threw on, and the operator's change silently did not take.
+   */
+  it("keeps every millisecond bound inside a 32-bit column", () => {
+    const INT32_MAX = 2_147_483_647;
+
+    for (const key of ["minHoldMs", "cooldownMs", "maxHoldMs"] as const) {
+      expect(NUMERIC_BOUNDS[key].max).toBeLessThanOrEqual(INT32_MAX);
+    }
+  });
+
+  it("still allows a window long enough to be useful", () => {
+    // Three weeks. Longer than any of these has a sensible reason to be.
+    expect(NUMERIC_BOUNDS.maxHoldMs.max).toBeGreaterThan(21 * 86_400_000);
   });
 });

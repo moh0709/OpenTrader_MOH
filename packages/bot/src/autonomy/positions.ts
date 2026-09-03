@@ -1,7 +1,8 @@
-import type { Candle, OpenPosition } from "@opentrader/ai-team";
+import type { Candle, HeadAction, OpenPosition } from "@opentrader/ai-team";
 import { xprisma } from "@opentrader/db";
 import { XEntityType, XOrderStatus } from "@opentrader/types";
 import { AUTOPILOT_REF_PREFIX } from "../trade-opener.js";
+import { lastExitRequest } from "./journal.js";
 
 /**
  * The book, as the trading head sees it.
@@ -100,6 +101,10 @@ export async function loadOpenPositions(botId: number): Promise<Map<string, Open
     // newest first would leave the trade that has had longest to go wrong open.
     if (out.has(trade.symbol)) continue;
 
+    // Whether the head has already told the exchange to sell this. Without it
+    // the loop would re-issue the same exit every minute until the fill landed.
+    const requested = await lastExitRequest(trade.id);
+
     out.set(trade.symbol, {
       smartTradeId: trade.id,
       symbol: trade.symbol,
@@ -110,6 +115,8 @@ export async function loadOpenPositions(botId: number): Promise<Map<string, Open
       // Filled in by the caller, which has the candles.
       peakPrice: entryPrice,
       takeProfitPrice: exit?.price ?? null,
+      exitRequestedAt: requested?.at ?? null,
+      exitRequestedAction: (requested?.action as HeadAction | undefined) ?? null,
     });
   }
 
