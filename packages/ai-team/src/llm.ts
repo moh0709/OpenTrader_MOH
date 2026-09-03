@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "@opentrader/logger";
 import { atrPercent, closes, rsi, slopePercent, sma } from "./indicators.js";
-import { chatCompletion, resolveProvider } from "./providers.js";
+import { chatCompletion, chatCompletionDetailed, resolveProvider } from "./providers.js";
 import { clampConfidence, type AgentOpinion, type MarketSnapshot, type Signal } from "./types.js";
 
 export type LlmEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -233,7 +233,20 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
   if (provider && provider.id !== "anthropic") {
     logger.info(`[ai-team] Strategist using ${provider.id} (${provider.model})`);
     return async function llmAnalystOpenAi(snapshot: MarketSnapshot): Promise<AgentOpinion | null> {
-      const text = await chatCompletion(provider, {
+      /*
+       * The detailed call, not the bare one.
+       *
+       * `chatCompletion` collapses every failure to null, and this seat then
+       * logged "LLM call failed" — which is the exact shape `ChatFailure` was
+       * written to replace, and for the same reason. A saturated free tier, an
+       * unfunded account and a model id the gateway does not serve are three
+       * different faults with three different fixes, and an operator watching
+       * the council run one voice short cannot tell which they have.
+       *
+       * The provider states which on every one of those responses. It costs
+       * nothing to pass it on.
+       */
+      const outcome = await chatCompletionDetailed(provider, {
         system: SYSTEM_PROMPT,
         user: buildSnapshotPrompt(snapshot),
         maxTokens: config.maxTokens,
@@ -241,14 +254,22 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
         json: true,
       });
 
-      if (!text) {
-        logger.warn("[ai-team] LLM call failed; using deterministic council");
+      if (!outcome.ok) {
+        logger.warn(
+          `[ai-team] ${provider.id}/${provider.model} could not answer (${outcome.status ?? "no response"}): ` +
+            `${outcome.reason}; using deterministic council`,
+        );
+
         return null;
       }
 
-      const parsed = parseOpinion(text);
+      const parsed = parseOpinion(outcome.text);
       if (!parsed) {
-        logger.warn("[ai-team] LLM output failed validation; using deterministic council");
+        logger.warn(
+          `[ai-team] ${provider.id}/${provider.model} answered with something that is not an opinion ` +
+            `(${outcome.text.slice(0, 120).replace(/\s+/g, " ")}); using deterministic council`,
+        );
+
         return null;
       }
 
