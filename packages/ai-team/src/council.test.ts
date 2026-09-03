@@ -158,8 +158,21 @@ describe("convene", () => {
       llmAnalyst: async () => null,
     });
 
-    expect(verdict.opinions.map((o) => o.agent)).not.toContain("llm-strategist");
-    expect(verdict.opinions.length).toBe(4);
+    const seats = verdict.opinions.map((o) => o.agent);
+
+    expect(seats).not.toContain("llm-strategist");
+    // Every deterministic seat is still filled. The three that read outside
+    // evidence report themselves unavailable on a snapshot that carries none,
+    // which is a filled seat abstaining rather than a missing one.
+    expect(seats).toEqual([
+      "market-analyst",
+      "quant-analyst",
+      "arbitrage-scout",
+      "technical-analyst",
+      "research-council",
+      "sentiment-analyst",
+      "risk-analyst",
+    ]);
     expect(verdict.vetoed).toBe(false);
   });
 

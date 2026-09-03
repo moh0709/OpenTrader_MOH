@@ -469,3 +469,130 @@ model AiAction {
   /// The feed is always read newest-first, over a window.
   @@index([at])
 }
+
+/// The trading head's standing orders. Singleton (id = 1).
+///
+/// The head is the only thing in this system that opens and closes positions on
+/// its own judgement rather than on a strategy's rules, so every number that
+/// bounds it lives here, in the database, where an operator can change it
+/// without a deploy and where it survives a restart.
+///
+/// `mode` is the switch that matters. In `observe` the head does the full
+/// round — gathers, deliberates, plans, journals — and places nothing. That is
+/// the default, and it is how a new watchlist or a changed limit gets a day of
+/// evidence before it is allowed to spend money.
+///
+/// Applied with `prisma db push`, as `RegimePolicy`, `AiSettings` and `AiAction`
+/// were. Nothing breaks if the table is absent: the head reports itself
+/// unconfigured and does not run.
+model AutopilotPolicy {
+  id Int @id @default(1)
+
+  /// Master switch. Off means the loop does not run at all.
+  enabled Boolean @default(false)
+
+  /// observe | live. Observe plans and journals but never places an order.
+  mode String @default("observe")
+
+  /// Markets to watch, JSON array of exchange symbols, e.g. ["BTC/USDT"].
+  symbols String @default("[]")
+
+  /// The bot whose exchange account, owner and credentials the head trades
+  /// through. Null means it has nowhere to route an order and will not trade.
+  botId Int?
+
+  /// Seconds between passes.
+  intervalSec Int @default(60)
+
+  /// Candle timeframe the council reasons over, e.g. "15m", "1h".
+  timeframe String @default("1h")
+
+  // --- Risk budget. Every one of these can only make the head do less. ------
+  equityQuote               Float @default(1000)
+  maxPositionQuote          Float @default(100)
+  maxTotalExposureQuote     Float @default(400)
+  maxOpenPositions          Int   @default(4)
+  maxDailyOpenNotionalQuote Float @default(600)
+  maxDailyLossQuote         Float @default(50)
+  maxConsecutiveLosses      Int   @default(3)
+
+  /// See `HeadLimits.minConfidence` in @opentrader/ai-team for why this is not
+  /// higher: the council's confidence is discounted for both disagreement and
+  /// silence, so a bar of 0.6 is a head that never opens anything.
+  minConfidence     Float @default(0.45)
+  minExitConfidence Float @default(0.35)
+
+  takeProfitPercent    Float @default(1.5)
+  stopLossPercent      Float @default(2.5)
+  trailStartPercent    Float @default(1.0)
+  trailGivebackPercent Float @default(0.5)
+
+  minHoldMs  Int @default(900000)
+  cooldownMs Int @default(600000)
+  /// Five days, in milliseconds. Beyond Int range would need BigInt; this is not.
+  maxHoldMs  Int @default(432000000)
+
+  roundTripFeeBps Float @default(55)
+
+  allowPyramiding Boolean @default(false)
+  /// Operator pause: blocks new entries, keeps managing what is open.
+  killSwitch      Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
+/// One decision by the trading head, whether or not it traded.
+///
+/// Written on every pass for every symbol, including the ones that resolved to
+/// "hold" — a log that only records trades hides the reasoning that mattered
+/// most, which is why the head stood still while the market moved.
+///
+/// This table is also the head's memory. Cooldowns and the daily opening budget
+/// are read back from here rather than held in the process, so a restart does
+/// not hand it a fresh budget or let it act twice on one idea.
+model AutopilotJournal {
+  id Int @id @default(autoincrement())
+
+  /// Epoch ms the decision was made.
+  at BigInt
+
+  symbol String
+
+  /// hold | open | add | take_profit | trail_exit | stop_out | close | flatten
+  action String
+
+  /// observe | live — what the head was allowed to do when it decided this.
+  mode String
+
+  /// True when an order actually reached the exchange for this decision.
+  executed Boolean @default(false)
+
+  /// Council confidence behind the decision, 0..1.
+  confidence Float @default(0)
+
+  /// Notional committed, for an entry.
+  sizeQuote   Float?
+  /// Base quantity exited, for an exit.
+  quantity    Float?
+  /// Reference price the decision was made at.
+  price       Float?
+  /// Net profit realised or estimated on an exit.
+  netPnlQuote Float?
+
+  /// The deal opened or closed, once there is one.
+  smartTradeId Int?
+
+  /// One sentence, the same words the action feed shows.
+  reason String
+
+  /// Everything the head considered, JSON stringified: the council's opinions,
+  /// the external readings, and every limit that clamped the size.
+  evidence String @default("{}")
+
+  createdAt DateTime @default(now())
+
+  /// Read newest-first, and per symbol for the cooldown check.
+  @@index([at])
+  @@index([symbol, at])
+}

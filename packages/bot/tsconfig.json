@@ -78,6 +78,12 @@
       ],
       "@opentrader/arbitrage/*": [
         "../arbitrage/src/*"
+      ],
+      "@opentrader/market-intel": [
+        "../market-intel/src/index.ts"
+      ],
+      "@opentrader/market-intel/*": [
+        "../market-intel/src/*"
       ]
     }
   },
@@ -123,6 +129,9 @@
     },
     {
       "path": "../types"
+    },
+    {
+      "path": "../market-intel"
     }
   ]
 }

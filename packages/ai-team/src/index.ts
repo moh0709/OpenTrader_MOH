@@ -3,6 +3,7 @@ export * from "./indicators.js";
 export * from "./agents.js";
 export * from "./council.js";
 export * from "./governor.js";
+export * from "./head.js";
 export * from "./llm.js";
 export * from "./providers.js";
 export * from "./activity.js";

@@ -30,6 +30,12 @@
       ],
       "@opentrader/logger/*": [
         "../logger/src/*"
+      ],
+      "@opentrader/market-intel": [
+        "../market-intel/src/index.ts"
+      ],
+      "@opentrader/market-intel/*": [
+        "../market-intel/src/*"
       ]
     }
   },
@@ -51,6 +57,9 @@
     },
     {
       "path": "../exchanges"
+    },
+    {
+      "path": "../market-intel"
     }
   ]
 }

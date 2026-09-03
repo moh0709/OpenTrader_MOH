@@ -25,6 +25,7 @@ import { dashboardService } from "@opentrader/trpc";
 import { bootstrapPlatform, type Platform } from "./platform.js";
 import { runPreflight } from "./preflight.js";
 import { startAiJournalStore } from "./ai/ai-journal-store.js";
+import { tradingHead } from "./autonomy/head.service.js";
 
 type AppParams = {
   server: CreateServerOptions;
@@ -45,6 +46,7 @@ export class App {
    */
   private logPruneTimer: NodeJS.Timeout | null = null;
   private regime = new RegimeService();
+  private head = tradingHead;
   private stopLearning: (() => void) | null = null;
   private stopAiJournal: (() => void) | null = null;
 
@@ -64,6 +66,20 @@ export class App {
 
     this.startLogPruning();
     this.regime.start();
+
+    /*
+     * The trading head, started unconditionally and disarmed by default.
+     *
+     * Starting the loop is not the same as letting it trade. It reads its
+     * policy from the database on every pass, and that policy ships disabled
+     * and in observe mode, so an install that has never been configured runs a
+     * loop that immediately decides it has no mandate and goes back to sleep.
+     *
+     * Starting it here rather than behind a flag means arming it is a click in
+     * the dashboard rather than a restart — and, more importantly, that
+     * disarming it is too.
+     */
+    this.head.start();
     // Restore the operator's saved AI settings before any strategy can tick,
     // so the council comes up on the provider they chose rather than whatever
     // the environment happens to carry.
@@ -172,6 +188,8 @@ export class App {
     }
 
     this.regime.stop();
+    this.head.stop();
+
     if (this.stopLearning) {
       this.stopLearning();
       this.stopLearning = null;

@@ -43,6 +43,25 @@ orphaned hundreds of positions. See [what was fixed](#what-was-fixed).
 
 ---
 
+## The trading head
+
+An AI that runs the desk rather than advising it: it watches a watchlist, gathers evidence from the exchange,
+TradingView, the research council and a sentiment index, convenes the agent council, and then opens, adds to,
+takes profit on, trails, cuts and flattens positions on its own judgement — continuously.
+
+Every other component here reacts to something. A strategy ticks when its candle closes; the regime governor
+adjusts a cap when a conviction lands; the learning loop writes a proposal when a streak appears. None of them
+decides *to trade*. This does, and it is answerable for the book rather than for a single signal.
+
+It ships disarmed and in observe mode, where it does the full round and places nothing — so you can read a
+day of what it would have done before letting it do any of it. Every limit lives in the database, the planner
+can only reduce or refuse against them, and disarming stops it deciding without closing anything.
+
+See [AUTONOMOUS-TRADING.md](AUTONOMOUS-TRADING.md) for the pass, the action set, the safety invariant and how
+to run it. The council it convenes is the one from [HYBRID-TRADER.md](HYBRID-TRADER.md), with three new seats.
+
+---
+
 ## The dashboard
 
 Served by OpenTrader itself at **`/analytics/`**, with an *Analytics* link added to the existing navigation.

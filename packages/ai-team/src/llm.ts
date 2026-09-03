@@ -81,6 +81,13 @@ How to judge:
   on predicting direction. Say so when you see one.
 - Thin evidence is a real answer. "hold" with low confidence is the correct output when
   the snapshot does not support a call, and it costs the desk nothing.
+- Some snapshots carry evidence computed outside this desk: an external technical rating
+  across several timeframes, a deep research council's standing view, and a market-wide
+  sentiment index. Treat these as genuine corroboration when they agree with the
+  indicators, and as a reason to lower confidence when they do not. Timeframes
+  disagreeing with each other is a warning, not something to average away. Sentiment at
+  an extreme argues for caution in the crowd's direction; it is never a reason to trade
+  on its own. Old evidence is weak evidence — every block states its age, so use it.
 
 Calibrate confidence honestly. 0.9 means you would be surprised to be wrong. 0.5 means
 the evidence genuinely points one way but not decisively. Below 0.4 you are guessing —
@@ -120,7 +127,7 @@ const OPINION_SCHEMA = {
  * over the same indicator readings the deterministic agents use, so the council
  * is arguing about interpretation rather than about different data.
  */
-export function buildSnapshotPrompt(snapshot: MarketSnapshot): string {
+export function buildSnapshotPrompt(snapshot: MarketSnapshot, now = Date.now()): string {
   const price = closes(snapshot.candles);
   const lines = [
     `Symbol: ${snapshot.symbol}`,
@@ -143,6 +150,45 @@ export function buildSnapshotPrompt(snapshot: MarketSnapshot): string {
     );
   } else {
     lines.push("Cross-venue: no scan this tick");
+  }
+
+  /*
+   * Evidence from outside our own candles.
+   *
+   * Named as coming from somewhere else, deliberately. The strategist should
+   * weigh an independent read differently from the indicators above it — those
+   * are the same numbers it can already see, recomputed; these are not.
+   *
+   * Each block is omitted entirely when the source had nothing, rather than
+   * printed as "n/a". A model shown an empty field tends to reason about the
+   * emptiness; a model shown nothing reasons about what it has.
+   */
+  const tv = snapshot.technical;
+  if (tv) {
+    const perTimeframe = Object.entries(tv.byTimeframe)
+      .map(([timeframe, value]) => `${timeframe}:${value.toFixed(2)}`)
+      .join(" ");
+
+    lines.push(
+      `External technical rating (${tv.source}, -1..1): ${tv.rating.toFixed(2)} (${tv.label.replace(/_/g, " ")})`,
+      `  per timeframe: ${perTimeframe}`,
+      `  ${Math.round(tv.alignment * 100)}% of ${tv.timeframes} timeframes agree`,
+      `  their RSI: ${tv.rsi?.toFixed(1) ?? "n/a"}, ADX: ${tv.adx?.toFixed(1) ?? "n/a"}`,
+      `  age: ${((now - tv.asOf) / 60_000).toFixed(0)} min`,
+    );
+  }
+
+  const conviction = snapshot.conviction;
+  if (conviction) {
+    lines.push(
+      `Research council: ${conviction.stance.replace(/_/g, " ")} at ${(conviction.confidence * 100).toFixed(0)}% confidence, ` +
+        `${((now - conviction.asOf) / 3_600_000).toFixed(1)}h old`,
+      conviction.summary ? `  "${conviction.summary.slice(0, 400)}"` : "  (no summary)",
+    );
+  }
+
+  if (snapshot.sentiment) {
+    lines.push(`Market sentiment (fear/greed, 0-100): ${snapshot.sentiment.value} — ${snapshot.sentiment.label}`);
   }
 
   return lines.join("\n");

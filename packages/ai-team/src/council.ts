@@ -1,4 +1,12 @@
-import { arbitrageScout, marketAnalyst, quantAnalyst, riskAnalyst } from "./agents.js";
+import {
+  arbitrageScout,
+  marketAnalyst,
+  quantAnalyst,
+  researchAnalyst,
+  riskAnalyst,
+  sentimentAnalyst,
+  technicalAnalyst,
+} from "./agents.js";
 import type { AgentOpinion, CouncilVerdict, MarketSnapshot, PortfolioState, RiskLimits, Signal } from "./types.js";
 
 /**
@@ -17,6 +25,25 @@ export const DEFAULT_WEIGHTS: AgentWeights = {
   "quant-analyst": 1.0,
   "arbitrage-scout": 1.5,
   "llm-strategist": 1.5,
+  /**
+   * The three outside voices.
+   *
+   * The technical analyst is weighted like the indicator agents rather than
+   * above them: it is a second opinion on the same question, computed
+   * elsewhere, and corroboration is worth a seat but not a casting vote.
+   *
+   * The research council is the deepest read at the table and the slowest — it
+   * has news and fundamentals the price series cannot carry, and its own agent
+   * already decays its confidence with age, so a full weight here does not let
+   * a stale view dominate.
+   *
+   * Sentiment is deliberately the quietest seat. It is context for sizing, not
+   * a reason to trade, and it only speaks at all when the crowd is at an
+   * extreme.
+   */
+  "technical-analyst": 1.0,
+  "research-council": 1.25,
+  "sentiment-analyst": 0.5,
 };
 
 export type CouncilOptions = {
@@ -26,6 +53,11 @@ export type CouncilOptions = {
    * removes it from the vote.
    */
   llmAnalyst?: (snapshot: MarketSnapshot) => Promise<AgentOpinion | null>;
+  /**
+   * Clock for the agents that judge how old their evidence is. Injected so the
+   * staleness rules can be tested without waiting a day.
+   */
+  now?: number;
 };
 
 /**
@@ -96,8 +128,27 @@ export async function convene(
 ): Promise<CouncilVerdict> {
   const weights = options.weights ?? DEFAULT_WEIGHTS;
 
+  const now = options.now ?? Date.now();
+
   const risk = riskAnalyst(snapshot, limits, state);
-  const opinions: AgentOpinion[] = [marketAnalyst(snapshot), quantAnalyst(snapshot), arbitrageScout(snapshot)];
+
+  /*
+   * Six deterministic seats, three of which are usually empty.
+   *
+   * The three outside agents report themselves unavailable when their evidence
+   * is missing or stale, and an unavailable agent is excluded from the tally
+   * entirely rather than counted as a dissenting hold. That is what makes this
+   * one council rather than two: the same code decides for a strategy running
+   * on candles alone and for the trading head running on everything.
+   */
+  const opinions: AgentOpinion[] = [
+    marketAnalyst(snapshot),
+    quantAnalyst(snapshot),
+    arbitrageScout(snapshot),
+    technicalAnalyst(snapshot, undefined, now),
+    researchAnalyst(snapshot, undefined, now),
+    sentimentAnalyst(snapshot),
+  ];
 
   if (options.llmAnalyst) {
     const llmOpinion = await options.llmAnalyst(snapshot);

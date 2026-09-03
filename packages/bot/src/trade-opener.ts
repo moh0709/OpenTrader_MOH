@@ -56,10 +56,26 @@ export function manualLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Manua
 }
 
 /**
- * Manually-opened deals are tagged so they can be counted against their own
- * budget without touching anything a bot created.
+ * Deals opened outside a strategy are tagged so they can be counted against
+ * their own budget without touching anything a bot created.
+ *
+ * Two lanes, because they answer to different people. A `manual:` deal was
+ * asked for by an operator or an agent through the API; an `auto:` deal was
+ * opened by the trading head on its own judgement. They share this code path —
+ * the pricing, the limit checks and the placement are identical — but not their
+ * budgets, so a busy morning of manual trades cannot quietly consume the head's
+ * daily allowance, or the reverse.
  */
 export const MANUAL_REF_PREFIX = "manual:";
+export const AUTOPILOT_REF_PREFIX = "auto:";
+
+/** Every lane that is not a strategy's own. Refs here survive a restart. */
+export const EXTERNAL_REF_PREFIXES = [MANUAL_REF_PREFIX, AUTOPILOT_REF_PREFIX] as const;
+
+/** True for a ref that belongs to one of the lanes above. */
+export function isExternalRef(ref: string | null | undefined): boolean {
+  return typeof ref === "string" && EXTERNAL_REF_PREFIXES.some((prefix) => ref.startsWith(prefix));
+}
 
 export type OpenTradeParams = {
   /** Supplies the exchange account, owner and default symbol. */
@@ -96,10 +112,10 @@ function startOfToday(): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
-/** Notional already opened manually today, in quote currency. */
-export async function manualNotionalToday(): Promise<number> {
+/** Notional already opened in one lane today, in quote currency. */
+export async function manualNotionalToday(prefix: string = MANUAL_REF_PREFIX): Promise<number> {
   const trades = await xprisma.smartTrade.findMany({
-    where: { ref: { startsWith: MANUAL_REF_PREFIX }, createdAt: { gte: startOfToday() } },
+    where: { ref: { startsWith: prefix }, createdAt: { gte: startOfToday() } },
     include: { orders: true },
   });
 
@@ -116,10 +132,10 @@ export async function manualNotionalToday(): Promise<number> {
   return total;
 }
 
-/** Manually-opened deals whose entry has not yet been exited. */
-export async function openManualPositions(): Promise<number> {
+/** Deals in one lane whose entry has not yet been exited. */
+export async function openManualPositions(prefix: string = MANUAL_REF_PREFIX): Promise<number> {
   const trades = await xprisma.smartTrade.findMany({
-    where: { ref: { startsWith: MANUAL_REF_PREFIX } },
+    where: { ref: { startsWith: prefix } },
     include: { orders: true },
   });
 
@@ -144,6 +160,11 @@ export async function openManualPositions(): Promise<number> {
 export async function openSmartTrade(
   params: OpenTradeParams,
   limits: ManualTradeLimits = manualLimitsFromEnv(),
+  /**
+   * Which lane this entry belongs to, and therefore whose budget it spends.
+   * Defaults to the manual lane so every existing caller is unaffected.
+   */
+  refPrefix: string = MANUAL_REF_PREFIX,
 ): Promise<OpenTradeResult> {
   const rejections: string[] = [];
   const refuse = (message: string): OpenTradeResult => ({ ok: false, rejections, message });
@@ -214,12 +235,12 @@ export async function openSmartTrade(
     rejections.push(`notional ${notionalQuote.toFixed(2)} exceeds the per-order cap ${limits.maxNotionalQuote}`);
   }
 
-  const openPositions = await openManualPositions();
+  const openPositions = await openManualPositions(refPrefix);
   if (openPositions >= limits.maxOpenPositions) {
     rejections.push(`${openPositions} manual positions already open (cap ${limits.maxOpenPositions})`);
   }
 
-  const usedToday = await manualNotionalToday();
+  const usedToday = await manualNotionalToday(refPrefix);
   if (usedToday + notionalQuote > limits.maxDailyNotionalQuote) {
     rejections.push(
       `daily manual budget would be exceeded: ${usedToday.toFixed(2)} used + ${notionalQuote.toFixed(2)} requested > ${limits.maxDailyNotionalQuote}`,
@@ -234,7 +255,7 @@ export async function openSmartTrade(
   // --- Create and place ----------------------------------------------------
   const side = params.side === "buy" ? XOrderSide.Buy : XOrderSide.Sell;
   const exitSide = side === XOrderSide.Buy ? XOrderSide.Sell : XOrderSide.Buy;
-  const ref = `${MANUAL_REF_PREFIX}${Date.now()}`;
+  const ref = `${refPrefix}${Date.now()}`;
 
   const orders: Record<string, unknown>[] = [
     {
@@ -278,7 +299,7 @@ export async function openSmartTrade(
   });
 
   logger.warn(
-    `[openSmartTrade] MANUAL ENTRY: ${params.side} ${quantity} ${symbol} ` +
+    `[openSmartTrade] ${refPrefix === MANUAL_REF_PREFIX ? "MANUAL" : "AUTOPILOT"} ENTRY: ${params.side} ${quantity} ${symbol} ` +
       `(~${notionalQuote.toFixed(2)} quote) as ${params.orderType} on bot ${bot.id}, deal ${created.id}`,
   );
 

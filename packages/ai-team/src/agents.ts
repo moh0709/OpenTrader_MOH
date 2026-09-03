@@ -213,3 +213,155 @@ export function riskAnalyst(snapshot: MarketSnapshot, limits: RiskLimits, state:
     },
   };
 }
+
+/**
+ * The outside technical read — TradingView's own multi-timeframe aggregate.
+ *
+ * The value of this seat is that it did not compute anything from our candles.
+ * When it agrees with the trend agent that is genuine corroboration from an
+ * independent pipeline; when it disagrees, one of the two is looking at a
+ * timeframe the other is not.
+ *
+ * Alignment across timeframes, not the headline rating, is what sets
+ * confidence. A market rated "buy" that is only a buy on the 5-minute is a
+ * different proposition from one that is a buy on every bar out to the week,
+ * and sizing them the same is how a desk gets caught by a pullback it could see
+ * coming.
+ */
+export function technicalAnalyst(snapshot: MarketSnapshot, maxAgeMs = 60 * 60 * 1000, now = Date.now()): AgentOpinion {
+  const read = snapshot.technical;
+
+  if (!read) return UNAVAILABLE("technical-analyst", "No external technical rating this tick");
+
+  const ageMs = now - read.asOf;
+  if (ageMs > maxAgeMs) {
+    return UNAVAILABLE("technical-analyst", `Rating is ${(ageMs / 3_600_000).toFixed(1)}h old, past the freshness limit`);
+  }
+
+  // A single reporting timeframe scores perfect alignment by arithmetic, which
+  // would be a lie. Discount by breadth so one bar cannot masquerade as a
+  // unanimous board.
+  const breadth = Math.min(1, read.timeframes / 4);
+  const strength = clampConfidence(Math.abs(read.rating) * read.alignment * breadth);
+
+  if (read.label === "neutral" || strength < 0.05) {
+    return {
+      agent: "technical-analyst",
+      signal: "hold",
+      confidence: 0,
+      rationale: `${read.source} is ${read.label.replace(/_/g, " ")} on ${read.symbol} (${read.rating.toFixed(2)} across ${read.timeframes} timeframes)`,
+      source: "deterministic",
+      evidence: { rating: read.rating, label: read.label, alignment: read.alignment, byTimeframe: read.byTimeframe, rsi: read.rsi, adx: read.adx },
+    };
+  }
+
+  return {
+    agent: "technical-analyst",
+    signal: read.rating > 0 ? "buy" : "sell",
+    confidence: strength,
+    rationale:
+      `${read.source} rates ${read.symbol} ${read.label.replace(/_/g, " ")} at ${read.rating.toFixed(2)}, ` +
+      `${Math.round(read.alignment * 100)}% of ${read.timeframes} timeframes agreeing` +
+      `${read.adx !== null ? `, ADX ${read.adx.toFixed(0)}` : ""}`,
+    source: "deterministic",
+    evidence: { rating: read.rating, label: read.label, alignment: read.alignment, byTimeframe: read.byTimeframe, rsi: read.rsi, adx: read.adx, ageMs },
+  };
+}
+
+/**
+ * The research council's seat — the twice-daily deep research run.
+ *
+ * This is the slowest and most expensive voice at the table, and the one that
+ * has read the news. It cannot time an entry, so its confidence is deliberately
+ * damped and decays with age: a conviction from this morning is a standing view
+ * of the week, not a reason to buy this minute.
+ */
+export function researchAnalyst(
+  snapshot: MarketSnapshot,
+  maxAgeMs = 26 * 60 * 60 * 1000,
+  now = Date.now(),
+): AgentOpinion {
+  const conviction = snapshot.conviction;
+
+  if (!conviction) return UNAVAILABLE("research-council", "No research conviction on this symbol");
+
+  const ageMs = now - conviction.asOf;
+
+  // A conviction dated in the future means a clock disagreement somewhere.
+  // Refused rather than trusted, exactly as the regime governor refuses it.
+  if (ageMs < 0) return UNAVAILABLE("research-council", "Conviction is dated in the future; ignoring");
+
+  if (ageMs > maxAgeMs) {
+    return UNAVAILABLE("research-council", `Conviction is ${(ageMs / 3_600_000).toFixed(1)}h old, past the ${(maxAgeMs / 3_600_000).toFixed(0)}h limit`);
+  }
+
+  // Linear decay to zero at the staleness limit. Yesterday's research is worth
+  // something, but less than this morning's.
+  const freshness = 1 - ageMs / maxAgeMs;
+  const conviction_strength = conviction.stance.startsWith("strong") ? 1 : 0.6;
+
+  if (conviction.stance === "hold") {
+    return {
+      agent: "research-council",
+      signal: "hold",
+      confidence: 0,
+      rationale: `Research council is neutral on this market: ${conviction.summary || "no directional view"}`,
+      source: "deterministic",
+      evidence: { stance: conviction.stance, confidence: conviction.confidence, ageHours: ageMs / 3_600_000 },
+    };
+  }
+
+  const bullish = conviction.stance === "buy" || conviction.stance === "strong_buy";
+
+  return {
+    agent: "research-council",
+    signal: bullish ? "buy" : "sell",
+    confidence: clampConfidence(clampConfidence(conviction.confidence) * conviction_strength * freshness),
+    rationale:
+      `Research council is ${conviction.stance.replace(/_/g, " ")} at ${Math.round(conviction.confidence * 100)}% ` +
+      `(${(ageMs / 3_600_000).toFixed(1)}h old)${conviction.summary ? `: ${conviction.summary.slice(0, 160)}` : ""}`,
+    source: "deterministic",
+    evidence: { stance: conviction.stance, confidence: conviction.confidence, ageHours: ageMs / 3_600_000, freshness },
+  };
+}
+
+/**
+ * Market-wide sentiment, as a contrarian brake.
+ *
+ * This agent never votes with the crowd. Extreme greed is a reason to be
+ * careful about buying, extreme fear a reason to be careful about selling, and
+ * everything in between is silence. It carries the lowest weight at the table
+ * on purpose: sentiment is context, not a trade.
+ */
+export function sentimentAnalyst(snapshot: MarketSnapshot, extreme = 20): AgentOpinion {
+  const read = snapshot.sentiment;
+
+  if (!read) return UNAVAILABLE("sentiment-analyst", "No market sentiment reading this tick");
+
+  // Distance from neutral, scaled so that the published "extreme" bands are
+  // where this agent starts speaking at all.
+  const distance = read.value - 50;
+
+  if (Math.abs(distance) < 50 - extreme) {
+    return {
+      agent: "sentiment-analyst",
+      signal: "hold",
+      confidence: 0,
+      rationale: `Market sentiment is ${read.label.toLowerCase()} at ${read.value}/100 — nothing extreme to lean against`,
+      source: "deterministic",
+      evidence: { value: read.value, label: read.label },
+    };
+  }
+
+  const confidence = clampConfidence((Math.abs(distance) - (50 - extreme)) / extreme);
+
+  return {
+    agent: "sentiment-analyst",
+    // Deliberately inverted: the crowd at an extreme is the fade.
+    signal: distance > 0 ? "sell" : "buy",
+    confidence,
+    rationale: `Market sentiment is ${read.label.toLowerCase()} at ${read.value}/100 — leaning against the crowd`,
+    source: "deterministic",
+    evidence: { value: read.value, label: read.label, distance },
+  };
+}

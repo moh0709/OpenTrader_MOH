@@ -159,6 +159,9 @@ importers:
       '@opentrader/logger':
         specifier: workspace:*
         version: link:../logger
+      '@opentrader/market-intel':
+        specifier: workspace:*
+        version: link:../market-intel
       '@opentrader/types':
         specifier: workspace:*
         version: link:../types
@@ -270,6 +273,9 @@ importers:
       '@opentrader/logger':
         specifier: workspace:*
         version: link:../logger
+      '@opentrader/market-intel':
+        specifier: workspace:*
+        version: link:../market-intel
       '@opentrader/regime':
         specifier: workspace:*
         version: link:../regime
@@ -377,6 +383,9 @@ importers:
       '@opentrader/logger':
         specifier: workspace:*
         version: link:../logger
+      '@opentrader/market-intel':
+        specifier: workspace:*
+        version: link:../market-intel
       '@opentrader/tools':
         specifier: workspace:*
         version: link:../tools
@@ -527,6 +536,25 @@ importers:
       typescript:
         specifier: 5.8.3
         version: 5.8.3
+
+  packages/market-intel:
+    dependencies:
+      '@opentrader/logger':
+        specifier: workspace:*
+        version: link:../logger
+    devDependencies:
+      '@opentrader/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.15.32
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: ^3.2.3
+        version: 3.2.3(@types/node@22.15.32)(jiti@2.4.2)(terser@5.42.0)(tsx@4.20.3)(yaml@2.8.0)
 
   packages/mcp-server:
     dependencies:

@@ -36,5 +36,26 @@ export {
   type PurgeResult,
   type SetLimitsResult,
 } from "./processing/executors/purge-bot.js";
-export { openSmartTrade, manualLimitsFromEnv, manualNotionalToday, openManualPositions } from "./trade-opener.js";
+export {
+  openSmartTrade,
+  manualLimitsFromEnv,
+  manualNotionalToday,
+  openManualPositions,
+  isExternalRef,
+  MANUAL_REF_PREFIX,
+  AUTOPILOT_REF_PREFIX,
+} from "./trade-opener.js";
 export type { OpenTradeParams, OpenTradeResult, ManualTradeLimits } from "./trade-opener.js";
+export {
+  TradingHead,
+  tradingHead,
+  loadAutopilotPolicy,
+  saveAutopilotPolicy,
+  loadOpenPositions,
+  summariseBook,
+  peakSince,
+  recentDecisions,
+  openedNotionalToday,
+  lastActionAt,
+} from "./autonomy/index.js";
+export type { AutopilotConfig, AutopilotMode, HeadPassResult, SymbolOutcome, JournalRow } from "./autonomy/index.js";

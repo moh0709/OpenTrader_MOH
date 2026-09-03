@@ -53,6 +53,10 @@ import {
 import { createAiGuards } from "./ai-guard.js";
 import { applyLearning, dismissLearning, evaluateLearning, revertLearning } from "../learning/learning.service.js";
 import { disarmRegime, syncRegime } from "../regime/regime.service.js";
+import { tradingHead } from "../autonomy/head.service.js";
+import { loadAutopilotPolicy, saveAutopilotPolicy } from "../autonomy/policy.js";
+import { loadOpenPositions, summariseBook } from "../autonomy/positions.js";
+import { openedNotionalToday, recentDecisions } from "../autonomy/journal.js";
 import { logger } from "@opentrader/logger";
 import type {
   Actor,
@@ -319,6 +323,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "GET /api/dash/regime/history", params: { limit: "1-200" }, description: "Conviction history per symbol, oldest first, for drawing how the council changed its mind." },
       { path: "GET /api/dash/regime/transcript", params: { symbol: "string" }, description: "The full analyst reports and bull/bear debate behind a symbol's latest conviction." },
       { path: "GET /api/dash/regime/runs", params: { limit: "1-200" }, description: "Recent research runs with cost and duration." },
+      { path: "GET /api/dash/autopilot", params: { limit: "1-200 recent decisions" }, description: "The trading head: its standing orders, the positions it holds, what it decided most recently and why, and which outside sources it is reading." },
       { path: "GET /api/dash/shares", params: {}, description: "Share links, their status and who is watching." },
       { path: "GET /api/dash/shares/watchers", params: {}, description: "Recipients watching a shared feed right now." },
     ],
@@ -337,6 +342,10 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       { path: "POST /api/dash/actions/regime.disarm", body: {}, scope: "control", description: "Disarm the governor and restore every managed bot to its baseline cap immediately." },
       { path: "POST /api/dash/actions/regime.sync", body: {}, scope: "control", description: "Reconcile caps against the latest convictions now, without waiting for the poll." },
       { path: "POST /api/dash/actions/regime.runNow", body: { symbols: "string[], optional" }, scope: "control", description: "Ask the research council to run now, out of schedule." },
+      { path: "POST /api/dash/actions/autopilot.setPolicy", body: { enabled: "boolean", mode: "observe|live", symbols: "string[]", botId: "number", intervalSec: "number", timeframe: "1m|5m|15m|1h|4h|1d", "…limits": "maxPositionQuote, maxTotalExposureQuote, maxOpenPositions, maxDailyOpenNotionalQuote, maxDailyLossQuote, maxConsecutiveLosses, minConfidence, minExitConfidence, takeProfitPercent, stopLossPercent, trailStartPercent, trailGivebackPercent, minHoldMs, cooldownMs, maxHoldMs, roundTripFeeBps, allowPyramiding, killSwitch" }, scope: "control", description: "Set the trading head's standing orders. Numbers are clamped into their bounds rather than refused. Mode 'observe' plans and journals without placing anything; only 'live' trades." },
+      { path: "POST /api/dash/actions/autopilot.arm", body: { mode: "observe|live, default observe" }, scope: "control", description: "Switch the trading head on. Defaults to observe, so arming and going live are two separate decisions." },
+      { path: "POST /api/dash/actions/autopilot.disarm", body: {}, scope: "control", description: "Switch the trading head off. Open positions are left exactly as they are — this stops it deciding, it does not close anything." },
+      { path: "POST /api/dash/actions/autopilot.runNow", body: {}, scope: "control", description: "Run one pass now instead of waiting for the interval, and return what it decided for every symbol." },
       { path: "GET /api/dash/learning", params: { limit: "1-100", status: "proposed|applied|reverted|dismissed" }, description: "The learning journal: loss-streak post-mortems and their adjustment proposals." },
       { path: "POST /api/dash/actions/learning.evaluate", body: {}, scope: "control", description: "Run the loss-streak sweep now instead of waiting for the timer." },
       { path: "POST /api/dash/actions/learning.apply", body: { id: "number" }, scope: "control", description: "Apply a journal proposal to the bot's settings. Values are clamped into guardrails; the previous settings are snapshotted for revert." },
@@ -1130,6 +1139,40 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
         ageHours: (now - Number(row.asOf)) / 3_600_000,
       })),
       openProposals: proposals.map((row) => ({ id: row.id, botName: row.botName, lossStreak: row.lossStreak })),
+      autopilot: await autopilotContext(now),
+    };
+  }
+
+  /**
+   * The trading head, summarised for the chat.
+   *
+   * Five decisions, not fifty: the assistant is being asked "what is it doing",
+   * and the answer to that is the last handful of calls plus the book, not a
+   * transcript. Returns null when the head is not configured, so the model is
+   * told nothing rather than told to guess.
+   */
+  async function autopilotContext(now: number): Promise<ChatContext["autopilot"]> {
+    const config = await loadAutopilotPolicy();
+    if (!config) return null;
+
+    const [decisions, book] = await Promise.all([
+      recentDecisions(5),
+      config.botId ? summariseBook(config.botId) : Promise.resolve(null),
+    ]);
+
+    return {
+      enabled: config.enabled,
+      mode: config.mode,
+      symbols: config.symbols,
+      openPositions: book?.openPositions ?? 0,
+      openExposureQuote: book?.openExposureQuote ?? 0,
+      lastDecisions: decisions.map((decision) => ({
+        symbol: decision.symbol,
+        action: decision.action,
+        executed: decision.executed,
+        reason: decision.reason,
+        ageMinutes: (now - decision.at) / 60_000,
+      })),
     };
   }
 
@@ -1540,6 +1583,177 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (!ok) return reply.code(503).send({ error: "unavailable", message: "The research service did not accept the run." });
 
     return { ok: true, queued: true };
+  });
+
+  // --- The trading head ----------------------------------------------------
+
+  /**
+   * Everything about the head in one read: what it may do, what it holds, and
+   * what it has been deciding.
+   *
+   * Deliberately one endpoint rather than four. The only useful question about
+   * an autonomous trader is "what is it doing and why", and answering it from
+   * three separate calls invites a dashboard that shows a decision next to a
+   * position it has already closed.
+   */
+  fastify.get("/autopilot", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const limit = Math.min(Math.max(num(query.limit) ?? 25, 1), 200);
+
+    const config = await loadAutopilotPolicy();
+
+    if (!config) {
+      return {
+        configured: false,
+        message: "The autopilot tables are missing. Run `prisma db push` to create them.",
+        policy: null,
+        positions: [],
+        book: null,
+        decisions: [],
+        head: tradingHead.status(),
+      };
+    }
+
+    const [decisions, positions, book, openedToday] = await Promise.all([
+      recentDecisions(limit),
+      config.botId ? loadOpenPositions(config.botId) : Promise.resolve(new Map()),
+      config.botId ? summariseBook(config.botId) : Promise.resolve(null),
+      openedNotionalToday(),
+    ]);
+
+    const now = Date.now();
+
+    return {
+      configured: true,
+      policy: config,
+      book: book ? { ...book, openedNotionalToday: openedToday } : null,
+      positions: [...positions.values()].map((position) => ({
+        ...position,
+        ageMs: now - position.openedAt,
+        notionalQuote: position.entryPrice * position.quantity,
+      })),
+      decisions,
+      head: tradingHead.status(),
+    };
+  });
+
+  /**
+   * Set the head's standing orders.
+   *
+   * Not routed through `control()` — that helper requires a botId and audits
+   * against one bot, and this is a desk-wide setting. The scope check, the
+   * freeze switch and the audit record are done here explicitly instead.
+   */
+  fastify.post("/actions/autopilot.setPolicy", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const body = (request.body ?? {}) as Record<string, unknown>;
+
+    try {
+      const config = await saveAutopilotPolicy(body);
+      dashboardService.invalidate();
+
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.setPolicy", target: { mode: config.mode, enabled: config.enabled }, outcome: "allowed", detail: null });
+      logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" set the trading head to ${config.enabled ? config.mode : "disarmed"} on ${config.symbols.join(", ") || "no symbols"}`);
+
+      recordAiAction({
+        chip: "settings",
+        severity: config.enabled && config.mode === "live" ? "warning" : "info",
+        title: config.enabled ? `Trading head: ${config.mode}` : "Trading head disarmed",
+        detail: config.enabled
+          ? `${config.symbols.length} market${config.symbols.length === 1 ? "" : "s"}, up to ${config.limits.maxPositionQuote} per position — set by ${actor.name}.`
+          : `Switched off by ${actor.name}. Open positions were left as they are.`,
+      });
+
+      return { ok: true, policy: config };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.setPolicy", target: {}, outcome: "failed", detail: message });
+
+      return reply.code(409).send({ error: "action_failed", message });
+    }
+  });
+
+  /**
+   * Switch the head on.
+   *
+   * Defaults to observe even when the stored policy says live, so that arming
+   * and going live stay two separate decisions. Going live is then an explicit
+   * `{ mode: "live" }`.
+   */
+  fastify.post("/actions/autopilot.arm", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const body = (request.body ?? {}) as { mode?: unknown };
+    const mode = body.mode === "live" ? "live" : "observe";
+
+    const config = await saveAutopilotPolicy({ enabled: true, mode });
+    dashboardService.invalidate();
+
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.arm", target: { mode }, outcome: "allowed", detail: null });
+    logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" armed the trading head in ${mode} mode`);
+
+    recordAiAction({
+      chip: "settings",
+      severity: mode === "live" ? "warning" : "info",
+      title: `Trading head armed (${mode})`,
+      detail:
+        mode === "live"
+          ? `It may now open and close positions on ${config.symbols.join(", ") || "no symbols yet"}.`
+          : "It will decide and write down what it would do, and place nothing.",
+    });
+
+    return { ok: true, policy: config };
+  });
+
+  /**
+   * Switch the head off.
+   *
+   * Stops it deciding. It does not close anything, and saying so plainly
+   * matters: an operator who reaches for this in a hurry needs to know their
+   * positions are still on, with their exits still resting.
+   */
+  fastify.post("/actions/autopilot.disarm", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const config = await saveAutopilotPolicy({ enabled: false });
+    dashboardService.invalidate();
+
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.disarm", target: {}, outcome: "allowed", detail: null });
+    logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" disarmed the trading head`);
+
+    recordAiAction({
+      chip: "settings",
+      severity: "warning",
+      title: "Trading head disarmed",
+      detail: "It has stopped deciding. Open positions are untouched and their exit orders are still working.",
+    });
+
+    return { ok: true, policy: config };
+  });
+
+  /** Run one pass now, and report what it decided for every symbol. */
+  fastify.post("/actions/autopilot.runNow", async (request: AuthedRequest, reply) => {
+    const actor = request.actor!;
+
+    const permission = agentAccess.canControl(actor);
+    if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
+
+    const result = await tradingHead.runOnce();
+    dashboardService.invalidate();
+
+    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.runNow", target: { executed: result.executed }, outcome: "allowed", detail: result.reason ?? null });
+
+    return { ok: true, ...result };
   });
 
   /** Run the loss-streak sweep now instead of waiting for the timer. */

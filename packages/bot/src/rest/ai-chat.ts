@@ -51,6 +51,18 @@ export const ALLOWED_ACTIONS: Record<string, { path: string; needsBotId: boolean
   "learning.apply": { path: "learning.apply", needsBotId: false, summary: "Apply a learning proposal" },
   "learning.revert": { path: "learning.revert", needsBotId: false, summary: "Undo an applied learning proposal" },
   "learning.dismiss": { path: "learning.dismiss", needsBotId: false, summary: "Dismiss a learning proposal" },
+  /*
+   * The trading head, in one direction only.
+   *
+   * Disarming and running a pass are both safe: one stops it deciding, the
+   * other only makes it decide sooner than it would have. Arming it and
+   * changing its limits are not here, and their absence is the point — a model
+   * that could widen its own risk budget or switch itself from observe to live
+   * would make every other guarantee in this file conditional on its judgement.
+   * Those two stay a human's click.
+   */
+  "autopilot.disarm": { path: "autopilot.disarm", needsBotId: false, summary: "Switch the trading head off (positions are left open)" },
+  "autopilot.runNow": { path: "autopilot.runNow", needsBotId: false, summary: "Make the trading head decide now" },
 };
 
 export const SYSTEM_PROMPT = [
@@ -161,6 +173,21 @@ export type ChatContext = {
   health: { status: string; warnings: number; criticals: number } | null;
   convictions: { symbol: string; stance: string; confidence: number; ageHours: number }[];
   openProposals: { id: number; botName: string; lossStreak: number }[];
+  /**
+   * The trading head, when it is configured.
+   *
+   * Optional because an install that has not run the migration has no head at
+   * all, and a snapshot that says "autopilot: unknown" would invite the model
+   * to speculate about a component that does not exist here.
+   */
+  autopilot?: {
+    enabled: boolean;
+    mode: string;
+    symbols: string[];
+    openPositions: number;
+    openExposureQuote: number;
+    lastDecisions: { symbol: string; action: string; executed: boolean; reason: string; ageMinutes: number }[];
+  } | null;
 };
 
 /**
@@ -212,6 +239,27 @@ export function buildContextBlock(context: ChatContext): string {
     lines.push("", "Learning proposals waiting:");
     for (const proposal of context.openProposals) {
       lines.push(`  #${proposal.id} ${proposal.botName}, after ${proposal.lossStreak} losses in a row`);
+    }
+  }
+
+  const head = context.autopilot;
+  if (head) {
+    lines.push(
+      "",
+      head.enabled
+        ? `Trading head: ${head.mode} on ${head.symbols.join(", ") || "no symbols"}, holding ${head.openPositions} position${head.openPositions === 1 ? "" : "s"} worth ${money(head.openExposureQuote)}.`
+        : "Trading head: disarmed. It is not deciding anything.",
+    );
+
+    if (head.mode === "observe" && head.enabled) {
+      lines.push("  (observe mode: it decides and writes it down, but places no orders)");
+    }
+
+    for (const decision of head.lastDecisions) {
+      lines.push(
+        `  ${decision.ageMinutes.toFixed(0)}m ago ${decision.symbol}: ${decision.action}` +
+          `${decision.executed ? "" : " (not placed)"} — ${decision.reason}`,
+      );
     }
   }
 

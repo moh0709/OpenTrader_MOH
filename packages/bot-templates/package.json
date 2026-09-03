@@ -26,6 +26,7 @@
     "@opentrader/bot-processor": "workspace:*",
     "@opentrader/exchanges": "workspace:*",
     "@opentrader/logger": "workspace:*",
+    "@opentrader/market-intel": "workspace:*",
     "@opentrader/tools": "workspace:*",
     "zod": "3.25.65"
   }

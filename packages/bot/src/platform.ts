@@ -1,7 +1,7 @@
 import { findStrategy, loadCustomStrategies } from "@opentrader/bot-templates/server";
 import { registerTradeOps } from "@opentrader/trpc";
 import { closeAllTrades, closeBotTrades, closeSmartTrade } from "./trade-closer.js";
-import { openSmartTrade } from "./trade-opener.js";
+import { isExternalRef, openSmartTrade } from "./trade-opener.js";
 import {
   xprisma,
   type ExchangeAccountWithCredentials,
@@ -147,23 +147,40 @@ export class Platform {
 
   /**
    * Cleans up trades left in an inconsistent state, e.g. from unexpected bot shutdowns.
+   *
+   * A strategy's `ref` is a key into a map that only exists while its bot is
+   * running, so a ref surviving a restart is a dangling pointer and clearing it
+   * is right.
+   *
+   * The `manual:` and `auto:` lanes are the exception, and clearing theirs was
+   * a real bug. Those refs are not pointers into anything — they are the record
+   * of which lane opened a deal, and both lanes count their daily budget by
+   * reading them back. Wiping them on every boot handed whichever lane had been
+   * busy a fresh allowance, and left the trading head unable to find the
+   * positions it was supposed to be managing.
    */
   async cleanOrphanedTrades() {
-    const tradesCount = await xprisma.smartTrade.count({
+    const orphaned = (await xprisma.smartTrade.findMany({
       where: { ref: { not: null } },
-    });
+      select: { id: true, ref: true },
+    })) as { id: number; ref: string | null }[];
 
-    if (tradesCount > 0) {
+    const strandedStrategyRefs = orphaned.filter((trade) => !isExternalRef(trade.ref));
+
+    if (strandedStrategyRefs.length > 0) {
       logger.warn(
-        `Found ${tradesCount} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
+        `Found ${strandedStrategyRefs.length} orphaned trades. This usually happens if the bot was stopped unexpectedly or crashed.`,
       );
       const result = await xprisma.smartTrade.updateMany({
-        where: { ref: { not: null } },
+        where: { id: { in: strandedStrategyRefs.map((trade) => trade.id) } },
         data: { ref: null },
       });
 
       logger.info(`Cleaned up ${result.count} orphaned trades.`);
     }
+
+    const kept = orphaned.length - strandedStrategyRefs.length;
+    if (kept > 0) logger.info(`Kept the lane tag on ${kept} manual or autopilot deals.`);
   }
 
   /**

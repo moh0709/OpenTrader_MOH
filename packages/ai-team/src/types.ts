@@ -1,4 +1,5 @@
 import type { ArbEvaluation } from "@opentrader/arbitrage";
+import type { SentimentReading, TechnicalRating } from "@opentrader/market-intel";
 
 export type Signal = "buy" | "sell" | "hold";
 
@@ -26,6 +27,34 @@ export type MarketSnapshot = {
   candles: Candle[];
   /** Best cross-venue evaluation for this symbol, when the scanner ran. */
   arb?: ArbEvaluation | null;
+  /**
+   * Evidence gathered from outside the desk's own candles.
+   *
+   * All three are optional and independently so. Each one has an agent that
+   * reads it and reports itself unavailable when it is absent, which is what
+   * lets the same council run whether it is deciding from six sources or from
+   * price alone.
+   */
+  technical?: TechnicalRating | null;
+  sentiment?: SentimentReading | null;
+  conviction?: CouncilConviction | null;
+};
+
+/**
+ * The research council's standing view of a market.
+ *
+ * Structurally the `Conviction` that `@opentrader/regime` mirrors from the
+ * TradingAgents service, restated here so the council package does not have to
+ * depend on the service client to read one. The regime type is assignable to
+ * this; the extra fields it carries are not needed to vote.
+ */
+export type CouncilConviction = {
+  stance: "strong_buy" | "buy" | "hold" | "sell" | "strong_sell";
+  /** 0..1. */
+  confidence: number;
+  summary: string;
+  /** Epoch ms of the run that produced this. */
+  asOf: number;
 };
 
 /**
