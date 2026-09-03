@@ -594,8 +594,10 @@ export class TradingHead {
           logger.info(`[Head] Pass complete: ${result.executed} of ${result.considered} markets acted on`);
         }
 
-        // The interval is policy, and policy changes without a restart.
-        if (result.ran) await this.retimeIfNeeded();
+        // The interval is policy, and policy changes without a restart. Checked
+        // whether or not the pass ran: a disarmed head still has to notice the
+        // moment its interval — or its arming — changes.
+        await this.retimeIfNeeded();
       } catch (error) {
         // A failure here must never take the daemon down. The positions the
         // head holds keep their resting exits, and the next pass tries again.
@@ -605,9 +607,12 @@ export class TradingHead {
       }
     };
 
-    void tick();
     this.schedule(DEFAULT_INTERVAL_MS, tick);
-    void this.retimeIfNeeded(tick);
+    // One first pass, not two. Kicking off a separate policy read alongside it
+    // had both racing to seed the singleton row on a cold start, and the loser
+    // reported its unique-constraint failure as a missing table. The pass
+    // retimes itself when it finishes.
+    void tick();
 
     logger.info("[Head] Trading head started");
   }

@@ -126,35 +126,59 @@ export function toConfig(row: PolicyRow): AutopilotConfig {
   };
 }
 
-/** Said once, not on every poll: a missing table would otherwise log every minute. */
-let warnedMissingTable = false;
+/** Said once, not on every poll: an unreadable policy would otherwise log every minute. */
+let warnedUnreadable = false;
+
+function warnUnreadable(error: unknown): null {
+  if (!warnedUnreadable) {
+    warnedUnreadable = true;
+    logger.warn(
+      `[Head] Autopilot policy unavailable (${error instanceof Error ? error.message : String(error)}). ` +
+        "If the table is missing, run `prisma db push`. The trading head will not run until this is fixed.",
+    );
+  }
+
+  return null;
+}
 
 /**
  * Read the standing orders, seeding the row on first use.
  *
- * Returns null only when the table is absent — an install that has not run
- * `prisma db push` since this shipped. The head then does not run at all, which
- * is the correct behaviour: no configuration means no mandate.
+ * Returns null when the policy cannot be read at all — most often an install
+ * that has not run `prisma db push` since this shipped. The head then does not
+ * run, which is the correct behaviour: no configuration means no mandate.
+ *
+ * The seed is deliberately tolerant of losing a race. Two callers can arrive
+ * here at the same instant on a cold start — the loop's first pass and whatever
+ * else asks for the policy while it is in flight — and only one of them may win
+ * a primary key. Reporting the loser's unique-constraint failure as "the table
+ * is missing" is how a correctly-migrated production install came up with the
+ * head switched off and a misleading line in the log telling the operator to
+ * run a migration that had already run.
  */
 export async function loadAutopilotPolicy(): Promise<AutopilotConfig | null> {
-  try {
-    const row = (await xprisma.autopilotPolicy.findUnique({ where: { id: POLICY_ID } })) as PolicyRow | null;
-    if (row) return toConfig(row);
+  const read = async (): Promise<PolicyRow | null> =>
+    (await xprisma.autopilotPolicy.findUnique({ where: { id: POLICY_ID } })) as PolicyRow | null;
 
+  try {
+    const existing = await read();
+    if (existing) return toConfig(existing);
+  } catch (error) {
+    return warnUnreadable(error);
+  }
+
+  try {
     const created = (await xprisma.autopilotPolicy.create({ data: { id: POLICY_ID } })) as PolicyRow;
     logger.info("[Head] Seeded autopilot policy with conservative defaults; it is disabled until armed.");
 
     return toConfig(created);
   } catch (error) {
-    if (!warnedMissingTable) {
-      warnedMissingTable = true;
-      logger.warn(
-        `[Head] Autopilot policy unavailable (${error instanceof Error ? error.message : String(error)}). ` +
-          "Run `prisma db push` to create the table. The trading head will not run until then.",
-      );
-    }
+    // Someone else seeded it between our read and our write. That is a success
+    // for the caller, not a failure — the row they wanted now exists.
+    const raced = await read().catch(() => null);
+    if (raced) return toConfig(raced);
 
-    return null;
+    return warnUnreadable(error);
   }
 }
 
