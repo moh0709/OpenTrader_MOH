@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { ExchangeClosedByUser, NetworkError, RequestTimeout } from "ccxt";
 import { MarketId, ITicker } from "@opentrader/types";
 import { logger } from "@opentrader/logger";
+import { warnThrottled } from "../throttled-warn.js";
 import { IExchange } from "@opentrader/exchanges";
 import type { TickerEvent } from "./types.js";
 
@@ -53,7 +54,10 @@ export class TickerChannel extends EventEmitter {
         this.emit("ticker", event);
       } catch (err) {
         if (err instanceof NetworkError || err instanceof RequestTimeout) {
-          logger.warn(
+          // Throttled: a flapping connection retries every three seconds, and
+          // the unthrottled version of this line was measured at 1,200 an hour.
+          warnThrottled(
+            `ticker:${this.exchange.exchangeCode}:${this.symbol}:${err.name}`,
             `[TickerChannel] ${err.name} occurred in ${this.exchange.exchangeCode}:${this.symbol}:  ${err.message}. Reconnecting in 3s…`,
           );
           await new Promise((resolve) => setTimeout(resolve, 3000)); // prevents infinite loop

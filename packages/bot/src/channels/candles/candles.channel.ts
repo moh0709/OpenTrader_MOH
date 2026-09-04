@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { ExchangeClosedByUser, NetworkError, NotSupported, RequestTimeout } from "ccxt";
 import type { IExchange } from "@opentrader/exchanges";
 import { logger } from "@opentrader/logger";
+import { warnThrottled } from "../throttled-warn.js";
 import { barSizeToDuration } from "@opentrader/tools";
 import { BarSize, ICandlestick } from "@opentrader/types";
 
@@ -69,7 +70,10 @@ export class CandlesChannel extends EventEmitter {
         }
       } catch (err) {
         if (err instanceof NetworkError || err instanceof RequestTimeout) {
-          logger.warn(
+          // Throttled: a flapping connection retries every three seconds, and
+          // the unthrottled version of this line was measured at 1,200 an hour.
+          warnThrottled(
+            `candles:${this.exchange.exchangeCode}:${this.symbol}:${err.name}`,
             `[CandlesChannel] ${err.name} occurred in ${this.exchange.exchangeCode}:${this.symbol}:  ${err.message}. Reconnecting in 3s…`,
           );
           await new Promise((resolve) => setTimeout(resolve, 3000)); // prevents infinite loop

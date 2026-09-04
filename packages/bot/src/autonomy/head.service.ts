@@ -206,6 +206,9 @@ export class TradingHead {
   /** The last hold written down per symbol, so the journal records news only. */
   private lastJournalled = new Map<string, { fingerprint: string; at: number }>();
 
+  /** The last decision logged per symbol, so the journal shows changes only. */
+  private lastLogged = new Map<string, { fingerprint: string; at: number }>();
+
   /** When housekeeping last ran, so it runs on its own slow schedule. */
   private lastPrunedAt = 0;
 
@@ -423,7 +426,20 @@ export class TradingHead {
       lastActionAt: await lastActionAt(symbol),
     });
 
-    logger.info(`[Head] ${describeHeadPlan(plan)}`);
+    /*
+     * The log follows the same rule as the feed and the journal: say it when it
+     * changes, not once a minute per symbol forever. Three symbols on a
+     * one-minute loop is 4,300 identical lines a day, which is how the one that
+     * mattered gets missed. Anything that trades is logged unconditionally
+     * below, in `execute`.
+     */
+    const planFingerprint = decisionFingerprint(plan);
+    const lastLogged = this.lastLogged.get(symbol);
+
+    if (!lastLogged || lastLogged.fingerprint !== planFingerprint || now - lastLogged.at >= HOLD_HEARTBEAT_MS) {
+      this.lastLogged.set(symbol, { fingerprint: planFingerprint, at: now });
+      logger.info(`[Head] ${describeHeadPlan(plan)}`);
+    }
 
     const evidence = {
       price,
@@ -478,6 +494,8 @@ export class TradingHead {
 
       return { symbol, action: plan.action, executed: false, reason: `Observing only: ${plan.reason}` };
     }
+
+    logger.info(`[Head] ${describeHeadPlan(plan)}`);
 
     const execution = await this.execute(plan, config, price);
 
