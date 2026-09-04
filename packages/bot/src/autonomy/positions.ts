@@ -187,8 +187,22 @@ export async function summariseBook(botId: number, now = Date.now()): Promise<Bo
 
   closed.sort((a, b) => b.at - a.at);
 
+  /*
+   * The losing streak is counted within the trading day, and that is a fix.
+   *
+   * It used to run over all history, which made the halt permanent: three
+   * losses in a row stopped the head opening anything, and it could not win its
+   * way out because it would not trade. On the first live day it bricked itself
+   * at 14:38 and then spent the next eleven hours deciding "not opening
+   * anything else today" once a minute, forever.
+   *
+   * "Today" is what the halt already said in the message an operator reads. Now
+   * the code agrees with it: the streak clears when the day does, the same way
+   * the loss budget does, and a bad run costs a day rather than the install.
+   */
   let consecutiveLosses = 0;
   for (const cycle of closed) {
+    if (cycle.at < dayStart) break;
     if (cycle.pnl < 0) consecutiveLosses += 1;
     else break;
   }

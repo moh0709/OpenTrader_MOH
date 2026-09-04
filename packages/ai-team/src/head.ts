@@ -177,10 +177,20 @@ export const DEFAULT_HEAD_LIMITS: HeadLimits = {
   minConfidence: 0.45,
   minExitConfidence: 0.35,
 
-  takeProfitPercent: 1.5,
-  stopLossPercent: 2.5,
-  trailStartPercent: 1.0,
-  trailGivebackPercent: 0.5,
+  /*
+   * Reward has to be bigger than risk, and it was not.
+   *
+   * The first live day ran a 1.5% target against a 2.5% stop — 0.6:1, which
+   * needs a 63% win rate just to break even, and the trail then cut the one
+   * winner at zero. Four trades: +0.01, -1.84, -1.89, -4.63.
+   *
+   * At 3.0 against 2.0 the break-even win rate is 40%, and the trail arms late
+   * enough that a winner has cleared its costs before it can be taken.
+   */
+  takeProfitPercent: 3.0,
+  stopLossPercent: 2.0,
+  trailStartPercent: 2.0,
+  trailGivebackPercent: 0.8,
 
   minHoldMs: 15 * 60 * 1000,
   cooldownMs: 10 * 60 * 1000,
@@ -402,12 +412,35 @@ export function planPosition(
       );
     }
 
-    // Trailing. Only arms after a real gain, and only fires while the position
-    // is still net positive: giving back to break-even is not a win to protect.
-    if (peakGainPercent >= limits.trailStartPercent && givebackPercent >= limits.trailGivebackPercent && pnl! > 0) {
-      return exit(
-        "trail_exit",
-        `${symbol} gave back ${givebackPercent.toFixed(2)}% from its peak; banked ${pnl!.toFixed(2)}.`,
+    /*
+     * Trailing, with a floor that makes it worth doing.
+     *
+     * "Still net positive" was not a high enough bar. On the first live day a
+     * trail armed at +1%, gave back 0.5%, and banked **0.008** — a winner
+     * closed for eight thousandths of a quote unit, because the round trip's
+     * fees had eaten everything the move earned. Positive, and pointless.
+     *
+     * The floor is one more round trip of fees, on top of the round trip
+     * already paid. It scales with the fee tier rather than being a number
+     * someone has to remember to retune, and it means a trailed exit always
+     * covers the cost of having made the trade at all.
+     *
+     * Below the floor the position simply keeps running: the stop is still
+     * underneath it, and a winner given room is the only kind that pays for the
+     * losers.
+     */
+    const trailFloorPercent = limits.roundTripFeeBps / 100;
+
+    if (peakGainPercent >= limits.trailStartPercent && givebackPercent >= limits.trailGivebackPercent) {
+      if (pnlPercent! >= trailFloorPercent) {
+        return exit(
+          "trail_exit",
+          `${symbol} gave back ${givebackPercent.toFixed(2)}% from its peak; banked ${pnl!.toFixed(2)}.`,
+        );
+      }
+
+      notes.push(
+        `trail triggered at ${pnlPercent!.toFixed(2)}% but that is under the ${trailFloorPercent.toFixed(2)}% floor; letting it run`,
       );
     }
 
@@ -542,6 +575,19 @@ export function planPosition(
     urgency: "now",
     netPnlQuote: pnl,
   });
+}
+
+/**
+ * What makes one decision different from the last.
+ *
+ * Digits are stripped, and that is the whole point. The reason a human reads
+ * carries live numbers — "Holding ETH/USDT at -0.55%" becomes "-0.53%" a minute
+ * later — so comparing the raw sentence made every single tick look like a
+ * change of mind. The head then announced one, once a minute, indefinitely.
+ * What matters is whether it is saying a *different kind* of thing.
+ */
+export function decisionFingerprint(plan: HeadPlan): string {
+  return `${plan.action}:${plan.reason.replace(/[\d.,%-]+/g, "#")}`;
 }
 
 /** One-line audit record for a plan, written whether or not it traded. */

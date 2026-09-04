@@ -147,6 +147,43 @@ export async function lastExitRequest(
   }
 }
 
+/**
+ * How long a "hold" is worth keeping. Executed decisions are kept forever.
+ *
+ * The distinction is the whole rule. A trade is a fact about money and belongs
+ * in the record permanently; a hold is context, useful for a week and then
+ * noise. Keeping both forever is what put this table at 98.6% of the database.
+ */
+export const HOLD_RETENTION_DAYS = 7;
+
+/**
+ * Drop holds past the retention window.
+ *
+ * Deliberately never touches a row with `executed = true`, whatever its age —
+ * the trading record is not housekeeping's to delete.
+ */
+export async function pruneJournal(retentionDays = HOLD_RETENTION_DAYS, now = Date.now()): Promise<number> {
+  if (retentionDays <= 0) return 0;
+
+  const cutoff = BigInt(now - retentionDays * 86_400_000);
+
+  try {
+    const result = await xprisma.autopilotJournal.deleteMany({
+      where: { executed: false, at: { lt: cutoff } },
+    });
+
+    if (result.count > 0) {
+      logger.info(`[Head] Pruned ${result.count} journal entries older than ${retentionDays} days`);
+    }
+
+    return result.count;
+  } catch (error) {
+    warnOnce(error, "Could not prune the autopilot journal");
+
+    return 0;
+  }
+}
+
 export type JournalRow = {
   id: number;
   at: number;

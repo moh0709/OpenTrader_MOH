@@ -230,7 +230,7 @@ describe("planPosition — budgets can only reduce", () => {
 describe("planPosition — managing a position", () => {
   it("takes profit at the target without asking the council", () => {
     const plan = planPosition(
-      snapshot({ price: 102 }),
+      snapshot({ price: 104 }),
       verdict({ signal: "buy", confidence: 0.9 }),
       position(),
       FREE,
@@ -241,14 +241,14 @@ describe("planPosition — managing a position", () => {
     expect(plan.action).toBe("take_profit");
     expect(plan.smartTradeId).toBe(42);
     expect(plan.quantity).toBe(1);
-    expect(plan.netPnlQuote).toBeCloseTo(1.8, 5);
+    expect(plan.netPnlQuote).toBeCloseTo(3.8, 5);
     // A winner that is still trending can afford to rest on the passive side.
     expect(plan.urgency).toBe("patient");
   });
 
   it("takes that profit urgently when the council has turned", () => {
     const plan = planPosition(
-      snapshot({ price: 102 }),
+      snapshot({ price: 104 }),
       verdict({ signal: "sell", confidence: 0.9 }),
       position(),
       FREE,
@@ -381,7 +381,7 @@ describe("planPosition — the kill switch", () => {
   });
 
   it("still takes a profit that is there", () => {
-    const plan = planPosition(snapshot({ price: 102 }), verdict(), position(), paused, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(snapshot({ price: 104 }), verdict(), position(), paused, portfolio({ openPositions: 1 }), NOW);
 
     expect(plan.action).toBe("take_profit");
   });
@@ -468,5 +468,47 @@ describe("planPosition — an exit already working", () => {
     const plan = planPosition(snapshot({ price: 97 }), verdict(), stale, FREE, portfolio({ openPositions: 1 }), NOW);
 
     expect(plan.action).toBe("stop_out");
+  });
+});
+
+/**
+ * The first live day lost money in a way no sample size fixes.
+ *
+ * A 1.5% target against a 2.5% stop is 0.6:1, which needs a 63% win rate just
+ * to break even — and the trail then closed the single winner for +0.008 after
+ * fees. Losers ran to the stop, winners were cut at zero.
+ */
+describe("planPosition — the trail must be worth taking", () => {
+  it("does not close a winner for less than the round trip costs", () => {
+    const fees: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 55, trailStartPercent: 1, trailGivebackPercent: 0.5 };
+    // Ran to 101.2, now 100.6: the trail has triggered, but net profit after
+    // fees is a rounding error. This is the "banked 0.008" trade.
+    const ran = position({ peakPrice: 101.2, entryFeeQuote: 0.2 });
+    const plan = planPosition(snapshot({ price: 100.6 }), verdict({ signal: "hold" }), ran, fees, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("hold");
+    expect(plan.notes.join(" ")).toMatch(/under the .* floor; letting it run/);
+  });
+
+  it("still trails once the move has cleared its costs", () => {
+    const fees: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 55, trailStartPercent: 1, trailGivebackPercent: 0.5 };
+    const ran = position({ peakPrice: 103, entryFeeQuote: 0.2 });
+    const plan = planPosition(snapshot({ price: 102 }), verdict({ signal: "hold" }), ran, fees, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("trail_exit");
+    expect(plan.netPnlQuote!).toBeGreaterThan(0.5);
+  });
+
+  it("ships defaults where reward is larger than risk", () => {
+    // Below 1:1 the desk needs to be right more often than it is wrong just to
+    // stand still, which is not a bet worth making with a stop this wide.
+    expect(DEFAULT_HEAD_LIMITS.takeProfitPercent).toBeGreaterThan(DEFAULT_HEAD_LIMITS.stopLossPercent);
+  });
+
+  it("arms the trail late enough that the fee floor is reachable", () => {
+    const floor = DEFAULT_HEAD_LIMITS.roundTripFeeBps / 100;
+    const lockedIn = DEFAULT_HEAD_LIMITS.trailStartPercent - DEFAULT_HEAD_LIMITS.trailGivebackPercent;
+
+    expect(lockedIn).toBeGreaterThan(floor);
   });
 });

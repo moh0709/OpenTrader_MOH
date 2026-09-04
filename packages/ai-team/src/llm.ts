@@ -201,6 +201,48 @@ type RawOpinion = {
   rationale: string;
 };
 
+/**
+ * Say why the model would not answer — once, then keep quiet about it.
+ *
+ * The reason itself is worth having: knowing a free tier is rate limited rather
+ * than a key being wrong is the difference between a two-minute fix and an
+ * afternoon. But a strategist that fails is asked again on the very next tick,
+ * for every symbol, and the provider's body arrives with newlines in it — so
+ * one bad afternoon put roughly 1,300 lines an hour into the journal, all of
+ * them the same sentence.
+ *
+ * The same failure is therefore logged once, then suppressed until it changes
+ * or the window lapses, and the repeat count comes with it so the scale of the
+ * outage is still visible. A *different* failure is always news and prints
+ * immediately.
+ */
+const FAILURE_REPEAT_MS = 15 * 60 * 1000;
+
+let lastFailure: { signature: string; at: number; suppressed: number } | null = null;
+
+function reportFailure(model: string, status: number | null, reason: string): void {
+  // The provider's body is quoted verbatim and can carry newlines, which turn
+  // one warning into a dozen journal lines. Flatten it first.
+  const flat = reason.replace(/\s+/g, " ").trim();
+  const signature = `${model}|${status ?? "none"}|${flat}`;
+  const now = Date.now();
+
+  if (lastFailure && lastFailure.signature === signature && now - lastFailure.at < FAILURE_REPEAT_MS) {
+    lastFailure.suppressed += 1;
+
+    return;
+  }
+
+  const repeats = lastFailure && lastFailure.signature === signature ? lastFailure.suppressed : 0;
+  const tail = repeats > 0 ? ` (and ${repeats} more like it since)` : "";
+
+  logger.warn(
+    `[ai-team] ${model} could not answer (${status ?? "no response"}): ${flat}${tail}; using deterministic council`,
+  );
+
+  lastFailure = { signature, at: now, suppressed: 0 };
+}
+
 function parseOpinion(text: string): RawOpinion | null {
   try {
     const parsed = JSON.parse(text) as RawOpinion;
@@ -255,19 +297,17 @@ export function createLlmAnalyst(config: LlmConfig = llmConfigFromEnv()) {
       });
 
       if (!outcome.ok) {
-        logger.warn(
-          `[ai-team] ${provider.id}/${provider.model} could not answer (${outcome.status ?? "no response"}): ` +
-            `${outcome.reason}; using deterministic council`,
-        );
+        reportFailure(`${provider.id}/${provider.model}`, outcome.status, outcome.reason);
 
         return null;
       }
 
       const parsed = parseOpinion(outcome.text);
       if (!parsed) {
-        logger.warn(
-          `[ai-team] ${provider.id}/${provider.model} answered with something that is not an opinion ` +
-            `(${outcome.text.slice(0, 120).replace(/\s+/g, " ")}); using deterministic council`,
+        reportFailure(
+          `${provider.id}/${provider.model}`,
+          null,
+          `answered with something that is not an opinion: ${outcome.text.slice(0, 120)}`,
         );
 
         return null;

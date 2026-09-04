@@ -2,6 +2,7 @@ import {
   DEFAULT_RISK_LIMITS,
   createLlmAnalyst,
   convene,
+  decisionFingerprint,
   describeHeadPlan,
   isEntry,
   llmConfigFromEnv,
@@ -25,7 +26,7 @@ import { IntelDesk, deskOptionsFromEnv, type MarketIntel } from "@opentrader/mar
 import type { ICandlestick } from "@opentrader/types";
 import { closeSmartTrade } from "../trade-closer.js";
 import { AUTOPILOT_REF_PREFIX, openSmartTrade, type ManualTradeLimits } from "../trade-opener.js";
-import { lastActionAt, openedNotionalToday, recordDecision } from "./journal.js";
+import { lastActionAt, openedNotionalToday, pruneJournal, recordDecision } from "./journal.js";
 import { loadAutopilotPolicy, type AutopilotConfig } from "./policy.js";
 import { loadOpenPositions, peakSince, summariseBook } from "./positions.js";
 
@@ -66,6 +67,13 @@ const CANDLE_LIMIT = 120;
 
 /** Until the policy has been read, poll at the conservative default. */
 const DEFAULT_INTERVAL_MS = 60_000;
+
+/** How often an unchanged hold is written down anyway, so quiet leaves a trail. */
+const HOLD_HEARTBEAT_MS = 30 * 60 * 1000;
+
+/** How often old holds are swept out. Slow: the window is measured in days. */
+const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 
 /** How the head's actions are painted in the AI feed. */
 const CHIP: Record<HeadPlan["action"], AiActionChip> = {
@@ -194,6 +202,12 @@ export class TradingHead {
 
   /** The last action reported per symbol, so the feed shows changes, not a heartbeat. */
   private lastReported = new Map<string, string>();
+
+  /** The last hold written down per symbol, so the journal records news only. */
+  private lastJournalled = new Map<string, { fingerprint: string; at: number }>();
+
+  /** When housekeeping last ran, so it runs on its own slow schedule. */
+  private lastPrunedAt = 0;
 
   /**
    * The LLM strategist, when one is reachable.
@@ -339,6 +353,7 @@ export class TradingHead {
   }): Promise<SymbolOutcome> {
     const { symbol, config, exchange, intel, conviction, book } = input;
 
+    const now = Date.now();
     const raw = await exchange.getCandlesticks({ symbol, bar: config.timeframe, limit: CANDLE_LIMIT });
     const candles = toCandles(raw);
 
@@ -428,7 +443,30 @@ export class TradingHead {
     };
 
     if (plan.action === "hold") {
-      await recordDecision({ plan, mode: config.mode, executed: false, price, smartTradeId: null, evidence });
+      /*
+       * A hold is written down when it is news, not once a minute.
+       *
+       * Every decision used to be journalled, holds included, on the reasoning
+       * that a log which only records trades hides why the desk stood still.
+       * That reasoning is right and the implementation was not: at three
+       * symbols a minute it wrote 4,300 rows a day, and after the head halted
+       * itself it wrote the identical row 2,662 times. The table reached 10 MB
+       * and 98.6% of the database, which tripped the bloat alarm, which mailed
+       * the operator every few minutes.
+       *
+       * So: the first hold of its kind is recorded, repeats are not, and a
+       * heartbeat goes in every half hour so a long quiet stretch still leaves
+       * a trail. Executed decisions are always recorded, unconditionally.
+       */
+      const fingerprint = decisionFingerprint(plan);
+      const last = this.lastJournalled.get(symbol);
+      const newsworthy = !last || last.fingerprint !== fingerprint || now - last.at >= HOLD_HEARTBEAT_MS;
+
+      if (newsworthy) {
+        this.lastJournalled.set(symbol, { fingerprint, at: now });
+        await recordDecision({ plan, mode: config.mode, executed: false, price, smartTradeId: null, evidence });
+      }
+
       this.report(plan, config, false, null);
 
       return { symbol, action: "hold", executed: false, reason: plan.reason };
@@ -537,7 +575,7 @@ export class TradingHead {
    * one minute it acted.
    */
   private report(plan: HeadPlan, config: AutopilotConfig, executed: boolean, failure: string | null): void {
-    const fingerprint = `${plan.action}:${plan.reason}`;
+    const fingerprint = decisionFingerprint(plan);
     const changed = this.lastReported.get(plan.symbol) !== fingerprint;
     this.lastReported.set(plan.symbol, fingerprint);
 
@@ -598,6 +636,13 @@ export class TradingHead {
         // whether or not the pass ran: a disarmed head still has to notice the
         // moment its interval — or its arming — changes.
         await this.retimeIfNeeded();
+
+        // Housekeeping, off the decision path and on its own slow clock.
+        const now = Date.now();
+        if (now - this.lastPrunedAt >= PRUNE_INTERVAL_MS) {
+          this.lastPrunedAt = now;
+          await pruneJournal();
+        }
       } catch (error) {
         // A failure here must never take the daemon down. The positions the
         // head holds keep their resting exits, and the next pass tries again.
