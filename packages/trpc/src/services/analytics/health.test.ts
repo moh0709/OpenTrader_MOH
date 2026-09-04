@@ -68,6 +68,42 @@ describe("runHealthChecks", () => {
     expect(check.detail).toContain("never pruned");
   });
 
+  it("says nothing about a table dominating a database that is tiny", () => {
+    /*
+     * Share alone cannot tell you whether a table is a problem. A young install
+     * always has one table holding most of a few megabytes, and calling that
+     * "bloat" pages an operator about nothing — which is how they learn to
+     * ignore their own alerts. Measured live: 1 MB of journal reading 82.6%.
+     */
+    const small = makeInput({
+      database: {
+        ...makeInput().database,
+        sizeBytes: 1_572_864,
+        largestTable: { name: "AutopilotJournal", bytes: 1_300_000 },
+      },
+    });
+
+    const check = find(runHealthChecks(small), "db.bloat");
+
+    expect(check.status).toBe("ok");
+    // The share is still reported — it is the interesting number once the
+    // database is actually large.
+    expect(check.value).toContain("% of DB");
+    expect(check.detail).not.toContain("never pruned");
+  });
+
+  it("still flags a dominant table once there is enough of it to hurt", () => {
+    const big = makeInput({
+      database: {
+        ...makeInput().database,
+        sizeBytes: 400 * 1_048_576,
+        largestTable: { name: "BotLog", bytes: 380 * 1_048_576 },
+      },
+    });
+
+    expect(find(runHealthChecks(big), "db.bloat").status).toBe("crit");
+  });
+
   it("escalates disk usage through warn to crit", () => {
     const disk = (freeGb: number) =>
       find(runHealthChecks(makeInput({ host: { ...makeInput().host, diskFreeBytes: freeGb * 1_073_741_824 } })), "host.disk").status;

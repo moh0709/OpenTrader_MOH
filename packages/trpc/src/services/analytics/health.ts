@@ -43,6 +43,16 @@ export type HealthThresholds = {
   /** Share of the database taken by a single table, percent. */
   tableBloatWarn: number;
   tableBloatCrit: number;
+  /**
+   * Size in MB below which a dominant table is not worth mentioning.
+   *
+   * Share alone cannot tell you whether a table is a problem. Every young
+   * install has one table holding most of a database that is a few megabytes
+   * in total, which is not bloat, it is a database. Without a floor this check
+   * pages the operator about 1 MB — and because it pages on the *set* of
+   * failing checks, each change in that set counted as new and mailed again.
+   */
+  tableBloatFloorMb: number;
   /** Age in ms of our own last successful fetch before it counts as stale. */
   tickerFetchWarn: number;
   tickerFetchCrit: number;
@@ -70,6 +80,8 @@ export const DEFAULT_HEALTH_THRESHOLDS: HealthThresholds = {
   dbSizeCrit: 2000,
   tableBloatWarn: 70,
   tableBloatCrit: 90,
+  // A database this small cannot be in trouble whatever its shape.
+  tableBloatFloorMb: 100,
   tickerFetchWarn: 60_000,
   tickerFetchCrit: 300_000,
   tickerReadingWarn: 600_000,
@@ -256,14 +268,26 @@ export function runHealthChecks(input: HealthInput): HealthReport {
 
     if (input.database.largestTable && input.database.sizeBytes > 0) {
       const share = (input.database.largestTable.bytes / input.database.sizeBytes) * 100;
+
+      /*
+       * A share this table would have to be big to matter.
+       *
+       * One table holding most of a small database is the normal shape of a
+       * young install, not a fault, and reporting it as one is how an operator
+       * learns to ignore their own alerts. The share is still shown — it is
+       * genuinely the interesting number once the database is large — but it
+       * only raises the status above ok once there is enough there to hurt.
+       */
+      const bigEnoughToMatter = bytesToMb(input.database.largestTable.bytes) >= t.tableBloatFloorMb;
+
       checks.push({
         id: "db.bloat",
         group: "Database",
         label: `Largest table (${input.database.largestTable.name})`,
-        status: byCeiling(share, t.tableBloatWarn, t.tableBloatCrit),
+        status: bigEnoughToMatter ? byCeiling(share, t.tableBloatWarn, t.tableBloatCrit) : "ok",
         value: `${share.toFixed(1)}% of DB`,
         detail:
-          share >= t.tableBloatWarn
+          bigEnoughToMatter && share >= t.tableBloatWarn
             ? `${input.database.largestTable.name} holds ${formatBytes(input.database.largestTable.bytes)}, dominating the database. Bot logs store a full market-data context per entry and are never pruned, so this grows without limit. Consider a retention policy or disabling logging on noisy bots.`
             : `${input.database.largestTable.name} holds ${formatBytes(input.database.largestTable.bytes)}.`,
         metric: share,
