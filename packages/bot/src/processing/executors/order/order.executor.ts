@@ -40,6 +40,34 @@ export class OrderExecutor {
       return false;
     }
 
+    /*
+     * A trigger price makes this a stop, whatever its type says.
+     *
+     * `XOrderType` knows only Limit and Market — an order's stop-ness lives in
+     * `stopPrice`, exactly as the schema comment says. Checked before the type
+     * branches below, because a stop-market carries type Market and would
+     * otherwise be placed as a plain market order: filling instantly, at the
+     * one moment it was never meant to fill.
+     */
+    if (this.order.stopPrice !== null && this.order.stopPrice !== undefined) {
+      const exchangeOrder = await this.exchange.placeStopOrder({
+        type: this.order.type === "Limit" ? "limit" : "market",
+        symbol: this.symbol,
+        side: this.order.side === XOrderSide.Buy ? "buy" : "sell",
+        quantity: this.order.quantity,
+        price: this.order.price ?? undefined,
+        stopPrice: this.order.stopPrice,
+      });
+
+      await xprisma.order.update({
+        where: { id: this.order.id },
+        data: { status: "Placed", exchangeOrderId: exchangeOrder.orderId, placedAt: new Date() },
+      });
+      await this.pullOrder();
+
+      return true;
+    }
+
     if (this.order.type === "Limit") {
       const exchangeOrder = await this.exchange.placeLimitOrder({
         symbol: this.symbol,

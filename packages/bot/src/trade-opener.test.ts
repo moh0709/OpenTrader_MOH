@@ -273,3 +273,75 @@ describe("manualLimitsFromEnv", () => {
     expect(l.allowedSymbols).toEqual(["BTC/USDT", "ETH/USDT"]);
   });
 });
+
+/**
+ * The resting stop.
+ *
+ * Every entry used to leave a take profit and nothing underneath it, so a
+ * filled position's downside lived only in the trading loop. On daily bars a
+ * position is held for weeks, which makes "the daemon was down" a real window
+ * rather than a theoretical one. These tests hold the shape of the order that
+ * closes it.
+ */
+describe("openSmartTrade — the resting stop", () => {
+  const ordersOf = (i = 0) =>
+    (state.created[i].orders as { createMany: { data: Record<string, unknown>[] } }).createMany.data;
+
+  it("leaves a stop below the entry when asked for one", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, takeProfitPrice: 115, stopLossPrice: 90 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const stop = ordersOf().find((o) => o.entityType === "StopLossOrder");
+    expect(stop).toBeDefined();
+    expect(stop!.stopPrice).toBe(90);
+    expect(stop!.side).toBe("Sell");
+  });
+
+  it("makes it a stop-market, so being out is what is guaranteed", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, stopLossPrice: 90 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const stop = ordersOf().find((o) => o.entityType === "StopLossOrder")!;
+    // A resting limit at the stop would be the one order that does not fill in
+    // the move it exists for. Market, with no price, and the trigger separate.
+    expect(stop.type).toBe("Market");
+    expect(stop.price).toBeNull();
+    expect(stop.quantity).toBe(0.1);
+  });
+
+  it("pairs the stop with the take profit rather than replacing it", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, takeProfitPrice: 115, stopLossPrice: 90 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const kinds = ordersOf().map((o) => o.entityType);
+    expect(kinds).toContain("EntryOrder");
+    expect(kinds).toContain("TakeProfitOrder");
+    expect(kinds).toContain("StopLossOrder");
+  });
+
+  it("places no stop when none was asked for", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, takeProfitPrice: 115 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    expect(ordersOf().some((o) => o.entityType === "StopLossOrder")).toBe(false);
+  });
+
+  it("puts the stop on the opposite side of a short", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "sell", quantity: 0.1, orderType: "limit", price: 100, stopLossPrice: 110 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const stop = ordersOf().find((o) => o.entityType === "StopLossOrder")!;
+    expect(stop.side).toBe("Buy");
+    expect(stop.stopPrice).toBe(110);
+  });
+});

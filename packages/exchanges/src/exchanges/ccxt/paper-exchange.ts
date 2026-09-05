@@ -91,6 +91,40 @@ export class PaperExchange extends CCXTExchange {
             continue;
           }
 
+          /*
+           * A stop triggers on the market moving through it and then fills at
+           * whatever is there — which is the whole point of a stop, and the
+           * reason it is not a limit. A protective sell on a long triggers on
+           * the way down and fills at the bid; a buy stop lifts the ask.
+           */
+          if (order.stopPrice !== null && order.stopPrice !== undefined) {
+            const last = (ticker.last ?? ticker.bid ?? ticker.ask) as number | undefined;
+            if (last === undefined) continue;
+
+            const triggered = order.side === "sell" ? last <= order.stopPrice : last >= order.stopPrice;
+            if (!triggered) continue;
+
+            const fillPrice = (order.side === "sell" ? (ticker.bid ?? last) : (ticker.ask ?? last)) as number;
+            const stopFee = paperFeeQuote(order.quantity, fillPrice);
+            const filledStop = await xprisma.paperOrder.update({
+              where: { id: order.id },
+              data: {
+                status: "filled" satisfies OrderStatus,
+                filledPrice: fillPrice,
+                fee: stopFee,
+                lastTradeTimestamp: new Date(),
+              },
+            });
+            this.openOrders = this.openOrders.filter((o) => o.id !== order.id);
+            console.log(
+              `[${this.exchangeCode} Paper] STOP ${order.side.toUpperCase()} ID:${order.id} triggered at ` +
+                `${order.stopPrice}, filled ${fillPrice} ${order.symbol} (fee ${stopFee.toFixed(4)})`,
+            );
+
+            this.emitOrder(filledStop);
+            continue;
+          }
+
           if (order.side === "buy" && order.price! >= (ticker.ask ?? ticker.last)!) {
             const fillPrice = (ticker.ask ?? ticker.last)!;
             const fee = paperFeeQuote(order.quantity, fillPrice);
@@ -166,9 +200,12 @@ export class PaperExchange extends CCXTExchange {
    * @internal
    */
   private async pullOpenOrders() {
+    // Resting limits and armed stops both wait on the ticker. Filtering on
+    // type alone left every stop invisible to the matcher, so one would have
+    // been placed and then never triggered.
     this.openOrders = await xprisma.paperOrder.findMany({
       where: {
-        type: "Limit" satisfies OrderType,
+        OR: [{ type: "Limit" satisfies OrderType }, { stopPrice: { not: null } }],
         status: {
           in: ["open", "partially_filled"] satisfies OrderStatus[],
         },
@@ -305,7 +342,31 @@ export class PaperExchange extends CCXTExchange {
    * @override
    */
   async placeStopOrder(params: IPlaceStopOrderRequest): Promise<IPlaceStopOrderResponse> {
-    throw new Error("Stop order is not supported in Paper Trading");
+    /*
+     * Paper refused stop orders outright, which meant the one exit that exists
+     * to survive the daemon being down could not be tested in the only lane
+     * this fork trades. The matcher already watches tickers for resting limits;
+     * a stop is that machinery with the trigger the other way round.
+     */
+    const order = await xprisma.paperOrder.create({
+      data: {
+        type: params.type === "limit" ? "Limit" : "Market",
+        symbol: params.symbol,
+        side: params.side,
+        quantity: params.quantity,
+        price: params.price ?? null,
+        stopPrice: params.stopPrice,
+      },
+    });
+
+    await this.pullOpenOrders();
+
+    setTimeout(() => {
+      this.emitOrder(order);
+      void this.match();
+    }, ORDER_PLACEMENT_DELAY);
+
+    return { orderId: `${order.id}` };
   }
 
   /**

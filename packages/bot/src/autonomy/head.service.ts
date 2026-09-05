@@ -624,6 +624,21 @@ export class TradingHead {
       const target = price * (1 + (config.limits.takeProfitPercent + config.limits.roundTripFeeBps / 100) / 100);
 
       /*
+       * The stop that survives the daemon.
+       *
+       * Every entry left a resting take profit and nothing underneath it, so a
+       * filled position's downside was protected only by this loop. An outage,
+       * a stalled pass or an exchange timeout left it naked — and on daily bars
+       * a position is held for weeks, so the window is not theoretical.
+       *
+       * Priced just below where the loop would act, the same way the take profit
+       * sits just above it: in normal operation the loop still decides and this
+       * never fires, and `closeSmartTrade` cancels it before placing any exit of
+       * its own, so the two can never both sell.
+       */
+      const stop = price * (1 - (config.limits.stopLossPercent + config.limits.roundTripFeeBps / 100) / 100);
+
+      /*
        * Rest at the bid, or cross the spread.
        *
        * A limit entry saves the half-spread and the maker fee, and is worth more
@@ -658,6 +673,7 @@ export class TradingHead {
           orderType: entryPrice === null ? "market" : "limit",
           price: entryPrice ?? undefined,
           takeProfitPrice: Number(target.toFixed(8)),
+          stopLossPrice: Number(stop.toFixed(8)),
         },
         doorLimits(config),
         AUTOPILOT_REF_PREFIX,

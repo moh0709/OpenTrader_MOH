@@ -144,15 +144,49 @@ function startOfToday(now: number): number {
  * the streak: an exit in flight is not yet a result, and treating it as one
  * would halt the desk on a trade that had not finished losing or winning.
  */
+/**
+ * How far back a closed trade can be and still matter here.
+ *
+ * Realised P&L and the losing streak are both scoped to the trading day, so a
+ * week of history is already generous. It exists to bound the read, not to
+ * decide anything.
+ */
+const CLOSED_LOOKBACK_MS = 7 * 86_400_000;
+
 export async function summariseBook(botId: number, now = Date.now()): Promise<BookSummary> {
+  const dayStart = startOfToday(now);
+
+  /*
+   * Two things are wanted here and they have different horizons, which is what
+   * the old `take: 200` got wrong.
+   *
+   * Open positions must be counted whatever their age — they are the exposure
+   * the caps are enforced against. Reading only the newest 200 deals meant that
+   * once the desk had traded past that (three markets made it distant, twenty
+   * eight makes it a matter of months) a position opened before the window
+   * stopped being counted at all. Exposure would read low and the head would
+   * open past a cap it believed it was under. A truncated read is precisely the
+   * kind of error these limits exist to prevent.
+   *
+   * Closed trades only matter for today's P&L and today's streak, so they are
+   * bounded by time rather than by count.
+   *
+   * The first clause is "no exit has filled" rather than "is open": a deal whose
+   * entry never filled is neither, and the entry-status check below excludes it
+   * exactly as before.
+   */
   const trades = (await xprisma.smartTrade.findMany({
-    where: { botId, ref: { startsWith: AUTOPILOT_REF_PREFIX } },
+    where: {
+      botId,
+      ref: { startsWith: AUTOPILOT_REF_PREFIX },
+      OR: [
+        { orders: { none: { entityType: { in: EXIT_TYPES }, status: XOrderStatus.Filled } } },
+        { createdAt: { gte: new Date(dayStart - CLOSED_LOOKBACK_MS) } },
+      ],
+    },
     include: { orders: true },
     orderBy: { createdAt: "desc" },
-    take: 200,
   })) as unknown as TradeRow[];
-
-  const dayStart = startOfToday(now);
 
   let openPositions = 0;
   let openExposureQuote = 0;

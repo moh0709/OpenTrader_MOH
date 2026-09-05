@@ -91,6 +91,13 @@ export type OpenTradeParams = {
   price?: number;
   /** Optional resting exit placed once the entry fills. */
   takeProfitPrice?: number;
+  /**
+   * Optional resting stop, placed alongside the take profit.
+   *
+   * The pair is what makes a filled entry survivable without the daemon: one
+   * order to take the win, one to cut the loss, both sitting at the venue.
+   */
+  stopLossPrice?: number;
 };
 
 export type OpenTradeResult = {
@@ -277,6 +284,22 @@ export async function openSmartTrade(
       entityType: XEntityType.TakeProfitOrder,
       side: exitSide,
       price: params.takeProfitPrice,
+      quantity,
+      symbol,
+      exchangeAccountId: bot.exchangeAccountId,
+    });
+  }
+
+  if (params.stopLossPrice) {
+    // A stop-market: triggered by price crossing, then filled at whatever the
+    // book offers. Being out is the point; the fill price is not the point.
+    orders.push({
+      status: XOrderStatus.Idle,
+      type: XOrderType.Market,
+      entityType: XEntityType.StopLossOrder,
+      side: exitSide,
+      price: null,
+      stopPrice: params.stopLossPrice,
       quantity,
       symbol,
       exchangeAccountId: bot.exchangeAccountId,

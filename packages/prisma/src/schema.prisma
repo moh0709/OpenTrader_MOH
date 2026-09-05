@@ -274,6 +274,8 @@ model PaperOrder {
   side               String // OrderSide
   quantity           Float
   price              Float?
+  /// Trigger for a stop order. Set means the order rests until price crosses it.
+  stopPrice          Float?
   filledPrice        Float?
   lastTradeTimestamp DateTime @default(now())
   status             String   @default("open") // OrderStatus
