@@ -357,8 +357,7 @@ describe("openSmartTrade — the resting stop", () => {
  */
 describe("openSmartTrade — a resting stop as the only exit", () => {
   const ordersOf = (i = 0) =>
-    (state.created[i].orders as { createMany: { data: Record<string, unknown> }[] } | { createMany: { data: Record<string, unknown>[] } })
-      .createMany.data as Record<string, unknown>[];
+    (state.created[i].orders as { createMany: { data: Record<string, unknown>[] } }).createMany.data;
 
   it("opens with an entry and a stop, and no take profit", async () => {
     await openSmartTrade(
