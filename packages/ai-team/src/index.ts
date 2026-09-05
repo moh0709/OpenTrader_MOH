@@ -7,3 +7,5 @@ export * from "./head.js";
 export * from "./llm.js";
 export * from "./providers.js";
 export * from "./activity.js";
+export * from "./paper/simulator.js";
+export * from "./paper/head-replay.js";
