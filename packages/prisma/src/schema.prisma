@@ -522,10 +522,23 @@ model AutopilotPolicy {
   minConfidence     Float @default(0.45)
   minExitConfidence Float @default(0.35)
 
-  takeProfitPercent    Float @default(1.5)
-  stopLossPercent      Float @default(2.5)
-  trailStartPercent    Float @default(1.0)
-  trailGivebackPercent Float @default(0.5)
+  /// Smallest net profit, in quote currency, that a profit-taking exit may
+  /// bank, and the floor an entry must be able to reach before it is opened at
+  /// all. Risk exits — the stop and the flatten — are deliberately not gated by
+  /// it: a floor on leaving a loser is how a small loss becomes an account.
+  minNetProfitQuote Float @default(3)
+
+  /// Reward has to be larger than risk.
+  ///
+  /// These four shipped as 1.5 / 2.5 / 1.0 / 0.5 — a 0.6:1 pairing needing a
+  /// 63% win rate just to stand still, which lost money on the first live day.
+  /// The code default in @opentrader/ai-team was corrected; these column
+  /// defaults were not, so every fresh db push kept seeding the broken pair.
+  /// They now match DEFAULT_HEAD_LIMITS, and a test holds them together.
+  takeProfitPercent    Float @default(3.0)
+  stopLossPercent      Float @default(2.0)
+  trailStartPercent    Float @default(2.0)
+  trailGivebackPercent Float @default(0.8)
 
   minHoldMs  Int @default(900000)
   cooldownMs Int @default(600000)

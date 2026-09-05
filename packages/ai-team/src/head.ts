@@ -133,6 +133,27 @@ export type HeadLimits = {
   /** Council confidence required to close on a change of view alone. */
   minExitConfidence: number;
 
+  /**
+   * Smallest net profit, in quote currency, that a voluntary exit may bank.
+   *
+   * Every other threshold on this desk is a percentage, and the base they apply
+   * to is `maxPositionQuote * confidence` — a number the operator caps but never
+   * floors. Measured against the council's real confidence range that made a
+   * take profit worth $2.10 and a trailed exit worth $0.45, against a stop
+   * costing $1.40. A win smaller than the loss it is paired with is not a win,
+   * it is a slower loss.
+   *
+   * This is the floor those percentages are checked against, and it binds in
+   * two places: an entry whose target is worth less than this is refused
+   * outright, and a profit-taking exit below it lets the position keep running
+   * with the stop still underneath it.
+   *
+   * It deliberately does NOT gate `stop_out` or `flatten`. Those are risk
+   * exits — being out is the point, and a floor on getting out of a loser is
+   * how a small loss becomes an account.
+   */
+  minNetProfitQuote: number;
+
   /** Net profit, as a percentage of entry notional, that takes profit. */
   takeProfitPercent: number;
   /** Net loss, as a percentage of entry notional, that stops out. */
@@ -176,6 +197,15 @@ export const DEFAULT_HEAD_LIMITS: HeadLimits = {
 
   minConfidence: 0.45,
   minExitConfidence: 0.35,
+
+  /*
+   * Three quote units, and the per-position cap has to be able to fund it.
+   *
+   * At a 3% target that implies a $100 minimum ticket (see `minTicketQuote`),
+   * which the $100 default cap funds exactly. Raising the floor without raising
+   * the cap is a head that refuses every trade, and says so.
+   */
+  minNetProfitQuote: 3,
 
   /*
    * Reward has to be bigger than risk, and it was not.
@@ -246,6 +276,24 @@ export type HeadPlan = {
   netPnlQuote: number | null;
 };
 
+/**
+ * The smallest position worth opening, in quote currency.
+ *
+ * Falls straight out of the arithmetic: `netProfitPercent` is already net of
+ * fees, so a position that reaches its target banks `ticket * takeProfitPercent`.
+ * Setting that equal to the floor and solving gives the ticket below which the
+ * trade cannot pay, however well it goes.
+ *
+ * Zero when no floor is set, so an operator who does not want one is not handed
+ * a minimum they never asked for.
+ */
+export function minTicketQuote(limits: Pick<HeadLimits, "minNetProfitQuote" | "takeProfitPercent">): number {
+  if (limits.minNetProfitQuote <= 0) return 0;
+  if (limits.takeProfitPercent <= 0) return Number.POSITIVE_INFINITY;
+
+  return (limits.minNetProfitQuote / limits.takeProfitPercent) * 100;
+}
+
 /** Net profit on a long position at `price`, after the entry fee and an estimated exit fee. */
 export function netProfit(position: OpenPosition, price: number, roundTripFeeBps: number): number {
   const gross = (price - position.entryPrice) * position.quantity;
@@ -264,7 +312,9 @@ export function netProfitPercent(position: OpenPosition, price: number, roundTri
   return (netProfit(position, price, roundTripFeeBps) / staked) * 100;
 }
 
-function plan(base: Partial<HeadPlan> & { symbol: string; action: HeadAction; reason: string; notes: string[] }): HeadPlan {
+function plan(
+  base: Partial<HeadPlan> & { symbol: string; action: HeadAction; reason: string; notes: string[] },
+): HeadPlan {
   return {
     sizeQuote: 0,
     quantity: 0,
@@ -330,7 +380,8 @@ export function planPosition(
    * urgent exit may override a patient one — but never another urgent one,
    * which is what bounds this to a single retry rather than a loop.
    */
-  const exitAge = held?.exitRequestedAt === null || held?.exitRequestedAt === undefined ? null : now - held.exitRequestedAt;
+  const exitAge =
+    held?.exitRequestedAt === null || held?.exitRequestedAt === undefined ? null : now - held.exitRequestedAt;
   const exitInFlight = exitAge !== null && exitAge >= 0 && exitAge < limits.cooldownMs;
   const lastExitWasUrgent = held?.exitRequestedAction === "stop_out" || held?.exitRequestedAction === "flatten";
 
@@ -402,7 +453,13 @@ export function planPosition(
     // Take profit is unconditional on the council. The trade made what it was
     // asked to make; asking the committee whether to keep going is how a
     // winner becomes a loser.
-    if (pnlPercent! >= limits.takeProfitPercent) {
+    //
+    // It is not unconditional on the money, though. A percentage target on an
+    // undersized ticket reaches "3%" while banking less than a stop costs, and
+    // the entry gate below should have refused that trade in the first place —
+    // but a limit lowered while a position was already open would slip past it,
+    // so the floor is checked here too rather than assumed upstream.
+    if (pnlPercent! >= limits.takeProfitPercent && pnl! >= limits.minNetProfitQuote) {
       return exit(
         "take_profit",
         `Took ${pnl!.toFixed(2)} on ${symbol} at ${pnlPercent!.toFixed(2)}%, its target.`,
@@ -429,10 +486,12 @@ export function planPosition(
      * underneath it, and a winner given room is the only kind that pays for the
      * losers.
      */
-    const trailFloorPercent = limits.roundTripFeeBps / 100;
+    const staked = held.entryPrice * held.quantity;
+    const feeFloorQuote = staked * (limits.roundTripFeeBps / 10_000);
+    const trailFloorQuote = Math.max(feeFloorQuote, limits.minNetProfitQuote);
 
     if (peakGainPercent >= limits.trailStartPercent && givebackPercent >= limits.trailGivebackPercent) {
-      if (pnlPercent! >= trailFloorPercent) {
+      if (pnl! >= trailFloorQuote) {
         return exit(
           "trail_exit",
           `${symbol} gave back ${givebackPercent.toFixed(2)}% from its peak; banked ${pnl!.toFixed(2)}.`,
@@ -440,7 +499,7 @@ export function planPosition(
       }
 
       notes.push(
-        `trail triggered at ${pnlPercent!.toFixed(2)}% but that is under the ${trailFloorPercent.toFixed(2)}% floor; letting it run`,
+        `trail triggered at ${pnl!.toFixed(2)} but that is under the ${trailFloorQuote.toFixed(2)} floor; letting it run`,
       );
     }
 
@@ -482,7 +541,9 @@ export function planPosition(
   if (verdict.vetoed) return stand(`Risk analyst vetoed: ${verdict.vetoReason}`);
 
   if (verdict.signal !== "buy") {
-    return stand(held ? `Holding ${symbol}; the council is not asking for more.` : `No entry on ${symbol}: ${verdict.rationale}`);
+    return stand(
+      held ? `Holding ${symbol}; the council is not asking for more.` : `No entry on ${symbol}: ${verdict.rationale}`,
+    );
   }
 
   if (verdict.confidence < limits.minConfidence) {
@@ -539,9 +600,25 @@ export function planPosition(
     );
   }
 
-  // Conviction scales size downward from the cap. Full confidence buys exactly
-  // the maximum and never more.
-  let sizeQuote = limits.maxPositionQuote * verdict.confidence;
+  /*
+   * The smallest trade worth making.
+   *
+   * Conviction still scales the ticket down from the cap, but no longer all the
+   * way to nothing. Below the floor a trade cannot pay for itself even when it
+   * works perfectly, so the choice is to size it up to the minimum or not take
+   * it — never to take it small. Sizing up is only allowed as far as the cap and
+   * the headroom already permit; every clamp below still only reduces.
+   */
+  const minTicket = minTicketQuote(limits);
+
+  if (minTicket > limits.maxPositionQuote) {
+    return stand(
+      `A ${limits.minNetProfitQuote} profit needs a ${minTicket.toFixed(2)} position at a ${limits.takeProfitPercent}% target, ` +
+        `over the ${limits.maxPositionQuote} per-position cap. Raise the cap or lower the floor.`,
+    );
+  }
+
+  let sizeQuote = Math.max(limits.maxPositionQuote * verdict.confidence, minTicket);
 
   const clamp = (ceiling: number, label: string) => {
     if (sizeQuote > ceiling) {
@@ -556,6 +633,16 @@ export function planPosition(
   clamp(limits.equityQuote, "available equity");
 
   if (sizeQuote <= 0) return stand("Position size resolved to zero once the limits were applied.");
+
+  // The clamps above can only reduce, so the floor has to be re-checked after
+  // them: an exposure or daily-budget headroom smaller than the minimum ticket
+  // means there is room for a trade, but not for one worth making.
+  if (sizeQuote < minTicket) {
+    return stand(
+      `Only ${sizeQuote.toFixed(2)} of headroom left, under the ${minTicket.toFixed(2)} needed to clear ` +
+        `${limits.minNetProfitQuote} at a ${limits.takeProfitPercent}% target; not opening a trade that cannot pay.`,
+    );
+  }
 
   if (price <= 0) return stand("No usable price; refusing to size a trade against it.");
 

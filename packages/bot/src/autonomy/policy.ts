@@ -61,6 +61,7 @@ type PolicyRow = {
   maxConsecutiveLosses: number;
   minConfidence: number;
   minExitConfidence: number;
+  minNetProfitQuote: number;
   takeProfitPercent: number;
   stopLossPercent: number;
   trailStartPercent: number;
@@ -112,6 +113,7 @@ export function toConfig(row: PolicyRow): AutopilotConfig {
       maxConsecutiveLosses: row.maxConsecutiveLosses,
       minConfidence: row.minConfidence,
       minExitConfidence: row.minExitConfidence,
+      minNetProfitQuote: row.minNetProfitQuote,
       takeProfitPercent: row.takeProfitPercent,
       stopLossPercent: row.stopLossPercent,
       trailStartPercent: row.trailStartPercent,
@@ -194,6 +196,12 @@ export const NUMERIC_BOUNDS: Record<string, { min: number; max: number }> = {
   maxConsecutiveLosses: { min: 1, max: 50 },
   minConfidence: { min: 0.1, max: 1 },
   minExitConfidence: { min: 0.1, max: 1 },
+  /*
+   * Zero is allowed, and means "no floor" rather than a broken setting.
+   * `minTicketQuote` returns 0 for it, so an operator who wants the old
+   * percentage-only behaviour can have it deliberately rather than by accident.
+   */
+  minNetProfitQuote: { min: 0, max: 100_000 },
   takeProfitPercent: { min: 0.1, max: 100 },
   stopLossPercent: { min: 0.1, max: 100 },
   trailStartPercent: { min: 0.1, max: 100 },
@@ -235,7 +243,14 @@ export async function saveAutopilotPolicy(patch: PolicyPatch): Promise<Autopilot
 
     const clamped = Math.min(bound.max, Math.max(bound.min, value));
     // Integer columns must not receive a fraction, and Prisma will not coerce.
-    data[key] = ["intervalSec", "maxOpenPositions", "maxConsecutiveLosses", "minHoldMs", "cooldownMs", "maxHoldMs"].includes(key)
+    data[key] = [
+      "intervalSec",
+      "maxOpenPositions",
+      "maxConsecutiveLosses",
+      "minHoldMs",
+      "cooldownMs",
+      "maxHoldMs",
+    ].includes(key)
       ? Math.round(clamped)
       : clamped;
   }

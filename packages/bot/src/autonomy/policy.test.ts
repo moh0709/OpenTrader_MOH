@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_HEAD_LIMITS } from "@opentrader/ai-team";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_AUTOPILOT, NUMERIC_BOUNDS, parseSymbols, toConfig } from "./policy.js";
 
@@ -26,6 +30,7 @@ const row = (overrides: Partial<Parameters<typeof toConfig>[0]> = {}) => ({
   maxConsecutiveLosses: 3,
   minConfidence: 0.6,
   minExitConfidence: 0.5,
+  minNetProfitQuote: 3,
   takeProfitPercent: 1.5,
   stopLossPercent: 2.5,
   trailStartPercent: 1,
@@ -107,5 +112,80 @@ describe("saveAutopilotPolicy bounds", () => {
   it("still allows a window long enough to be useful", () => {
     // Three weeks. Longer than any of these has a sensible reason to be.
     expect(NUMERIC_BOUNDS.maxHoldMs.max).toBeGreaterThan(21 * 86_400_000);
+  });
+});
+
+/**
+ * The schema and the code have to agree about what a default is.
+ *
+ * `DEFAULT_HEAD_LIMITS` was corrected to a 3.0 / 2.0 reward-to-risk pairing
+ * after the first live day lost money on 1.5 / 2.5. The Prisma column defaults
+ * were not, and there are no migrations in this repository — so every fresh
+ * `prisma db push` went on seeding the pairing that had already been diagnosed
+ * as unprofitable, and the correction only ever reached installs whose operator
+ * had typed the numbers in by hand.
+ *
+ * Two sources of truth for one number is the bug. This test is the join.
+ */
+describe("schema defaults match the shipped limits", () => {
+  const schema = readFileSync(
+    join(fileURLToPath(new URL(".", import.meta.url)), "../../../prisma/src/schema.prisma"),
+    "utf8",
+  );
+
+  const model = schema.slice(schema.indexOf("model AutopilotPolicy"));
+  const block = model.slice(0, model.indexOf("\n}"));
+
+  /**
+   * The `@default(...)` on one column of AutopilotPolicy.
+   *
+   * Parsed line by line rather than with one clever expression: the schema is a
+   * flat list of columns, and a parser that can be read at a glance is worth
+   * more here than a compact one.
+   */
+  const defaultOf = (column: string): number => {
+    for (const line of block.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts[0] !== column || parts[1] !== "Float") continue;
+
+      const marker = parts.find((part) => part.startsWith("@default("));
+      if (!marker) break;
+
+      return Number(marker.slice("@default(".length, -1));
+    }
+
+    throw new Error(`no Float column '${column}' with a default in AutopilotPolicy`);
+  };
+
+  const COLUMNS = [
+    "minConfidence",
+    "minExitConfidence",
+    "minNetProfitQuote",
+    "takeProfitPercent",
+    "stopLossPercent",
+    "trailStartPercent",
+    "trailGivebackPercent",
+    "roundTripFeeBps",
+    "equityQuote",
+    "maxPositionQuote",
+    "maxTotalExposureQuote",
+    "maxDailyOpenNotionalQuote",
+    "maxDailyLossQuote",
+  ] as const;
+
+  for (const column of COLUMNS) {
+    it(`seeds ${column} with the shipped default`, () => {
+      expect(defaultOf(column)).toBe(DEFAULT_HEAD_LIMITS[column]);
+    });
+  }
+
+  it("seeds a reward larger than the risk", () => {
+    expect(defaultOf("takeProfitPercent")).toBeGreaterThan(defaultOf("stopLossPercent"));
+  });
+
+  it("seeds a floor the seeded cap can fund", () => {
+    const minTicket = (defaultOf("minNetProfitQuote") / defaultOf("takeProfitPercent")) * 100;
+
+    expect(minTicket).toBeLessThanOrEqual(defaultOf("maxPositionQuote"));
   });
 });

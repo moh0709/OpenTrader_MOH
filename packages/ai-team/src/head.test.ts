@@ -3,6 +3,7 @@ import {
   DEFAULT_HEAD_LIMITS,
   isEntry,
   isExit,
+  minTicketQuote,
   netProfitPercent,
   planPosition,
   type HeadLimits,
@@ -71,14 +72,57 @@ function position(overrides: Partial<OpenPosition> = {}): OpenPosition {
 /** Zero fees, so a test about a rule is not also a test about arithmetic. */
 const FREE: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 0 };
 
+/**
+ * A cap with room above the minimum ticket.
+ *
+ * At the shipped cap of 100 the `minNetProfitQuote` floor works out to exactly
+ * 100 as well, so conviction has nowhere to scale and every trade is the cap.
+ * That is correct and deliberate, and it is covered on its own below — but it
+ * makes the cap a bad fixture for testing the sizing rules, because every
+ * answer is 100 whatever the question was.
+ */
+const ROOMY: HeadLimits = { ...FREE, maxPositionQuote: 250 };
+
 describe("planPosition — opening", () => {
   it("opens on a confident buy and sizes below the cap", () => {
-    const plan = planPosition(snapshot(), verdict({ confidence: 0.8 }), null, FREE, portfolio(), NOW);
+    const plan = planPosition(snapshot(), verdict({ confidence: 0.8 }), null, ROOMY, portfolio(), NOW);
 
     expect(plan.action).toBe("open");
-    expect(plan.sizeQuote).toBeCloseTo(80, 5);
-    expect(plan.quantity).toBeCloseTo(0.8, 5);
+    expect(plan.sizeQuote).toBeCloseTo(200, 5);
+    expect(plan.quantity).toBeCloseTo(2, 5);
     expect(isEntry(plan.action)).toBe(true);
+  });
+
+  it("never sizes below the ticket that could earn the floor", () => {
+    // 0.5 of a 250 cap is 125, comfortably over the 100 minimum.
+    expect(planPosition(snapshot(), verdict({ confidence: 0.5 }), null, ROOMY, portfolio(), NOW).sizeQuote).toBeCloseTo(
+      125,
+      5,
+    );
+
+    // 0.46 of it is 115 — still over. Conviction scales inside the band.
+    expect(
+      planPosition(snapshot(), verdict({ confidence: 0.46 }), null, ROOMY, portfolio(), NOW).sizeQuote,
+    ).toBeCloseTo(115, 5);
+
+    // At the shipped cap the floor and the cap meet, so conviction cannot
+    // scale at all and every trade is 100. Worth asserting rather than
+    // discovering: it means the entry bar, not the ticket, is what an operator
+    // on the defaults is actually tuning.
+    const atCap = planPosition(snapshot(), verdict({ confidence: 0.5 }), null, FREE, portfolio(), NOW);
+    expect(atCap.sizeQuote).toBeCloseTo(FREE.maxPositionQuote, 5);
+  });
+
+  it("refuses outright when the cap cannot fund the floor", () => {
+    // A $3 floor at a 3% target needs $100. A $50 cap can never get there, and
+    // the head says which of the two numbers to change rather than sizing to
+    // something that cannot pay.
+    const tooSmall: HeadLimits = { ...FREE, maxPositionQuote: 50 };
+    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, tooSmall, portfolio(), NOW);
+
+    expect(plan.action).toBe("hold");
+    expect(plan.reason).toMatch(/over the 50 per-position cap/);
+    expect(plan.reason).toMatch(/Raise the cap or lower the floor/);
   });
 
   it("refuses a buy under the confidence floor, and says so", () => {
@@ -169,7 +213,14 @@ describe("planPosition — opening", () => {
 
   it("adds when pyramiding is explicitly allowed", () => {
     const limits = { ...FREE, allowPyramiding: true };
-    const plan = planPosition(snapshot(), verdict(), position(), limits, portfolio({ openPositions: 1, openExposureQuote: 100 }), NOW);
+    const plan = planPosition(
+      snapshot(),
+      verdict(),
+      position(),
+      limits,
+      portfolio({ openPositions: 1, openExposureQuote: 100 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("add");
   });
@@ -177,19 +228,31 @@ describe("planPosition — opening", () => {
 
 describe("planPosition — budgets can only reduce", () => {
   it("clamps to the remaining exposure headroom", () => {
-    const tight = portfolio({ openExposureQuote: DEFAULT_HEAD_LIMITS.maxTotalExposureQuote - 30 });
-    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, FREE, tight, NOW);
+    const tight = portfolio({ openExposureQuote: ROOMY.maxTotalExposureQuote - 150 });
+    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, ROOMY, tight, NOW);
 
     expect(plan.action).toBe("open");
-    expect(plan.sizeQuote).toBeCloseTo(30, 5);
+    expect(plan.sizeQuote).toBeCloseTo(150, 5);
     expect(plan.notes.join(" ")).toMatch(/remaining exposure headroom/);
   });
 
   it("clamps to what is left of the day's opening budget", () => {
-    const spent = portfolio({ openedNotionalToday: DEFAULT_HEAD_LIMITS.maxDailyOpenNotionalQuote - 25 });
-    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, FREE, spent, NOW);
+    const spent = portfolio({ openedNotionalToday: ROOMY.maxDailyOpenNotionalQuote - 120 });
+    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, ROOMY, spent, NOW);
 
-    expect(plan.sizeQuote).toBeCloseTo(25, 5);
+    expect(plan.sizeQuote).toBeCloseTo(120, 5);
+  });
+
+  it("refuses when the headroom left is too thin to be worth trading", () => {
+    // 30 of room is room for a trade, but not for one that can earn 3 at a 3%
+    // target. Taking it would be spending the day's budget on a position that
+    // cannot pay for itself.
+    const tight = portfolio({ openExposureQuote: ROOMY.maxTotalExposureQuote - 30 });
+    const plan = planPosition(snapshot(), verdict({ confidence: 1 }), null, ROOMY, tight, NOW);
+
+    expect(plan.action).toBe("hold");
+    expect(plan.reason).toMatch(/under the 100.00 needed/);
+    expect(plan.reason).toMatch(/cannot pay/);
   });
 
   it("refuses once there is no headroom at all", () => {
@@ -269,17 +332,27 @@ describe("planPosition — managing a position", () => {
   });
 
   it("trails a winner that gives back too much of its peak", () => {
-    const ran = position({ peakPrice: 102 });
+    // Ten units rather than one, so the 0.8% left on the table is 8 quote
+    // units and clears the floor. On a single unit the same move is 80 cents,
+    // which is the trade the floor exists to refuse — covered below.
+    const ran = position({ quantity: 10, peakPrice: 102 });
     // 1.2% off a 102 peak, still net positive at 100.8.
     const plan = planPosition(snapshot({ price: 100.8 }), verdict(), ran, FREE, portfolio({ openPositions: 1 }), NOW);
 
     expect(plan.action).toBe("trail_exit");
-    expect(plan.netPnlQuote).toBeGreaterThan(0);
+    expect(plan.netPnlQuote).toBeGreaterThan(FREE.minNetProfitQuote);
   });
 
   it("does not trail a position back through break-even", () => {
     const ran = position({ peakPrice: 102 });
-    const plan = planPosition(snapshot({ price: 99.5 }), verdict({ signal: "hold" }), ran, FREE, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 99.5 }),
+      verdict({ signal: "hold" }),
+      ran,
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("hold");
   });
@@ -314,7 +387,14 @@ describe("planPosition — managing a position", () => {
 
   it("releases capital from a position that has gone nowhere for too long", () => {
     const stale = position({ openedAt: NOW - DEFAULT_HEAD_LIMITS.maxHoldMs - HOUR });
-    const plan = planPosition(snapshot({ price: 99.9 }), verdict({ signal: "hold" }), stale, FREE, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 99.9 }),
+      verdict({ signal: "hold" }),
+      stale,
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("close");
     expect(plan.reason).toMatch(/without working/);
@@ -323,7 +403,14 @@ describe("planPosition — managing a position", () => {
   it("leaves a long-held winner alone rather than closing it on age", () => {
     const stale = position({ openedAt: NOW - DEFAULT_HEAD_LIMITS.maxHoldMs - HOUR });
     // Up, but under the take-profit target, and not off a peak.
-    const plan = planPosition(snapshot({ price: 101 }), verdict({ signal: "hold" }), stale, FREE, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 101 }),
+      verdict({ signal: "hold" }),
+      stale,
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("hold");
   });
@@ -372,7 +459,14 @@ describe("planPosition — the kill switch", () => {
   });
 
   it("keeps protecting a position that is already on", () => {
-    const plan = planPosition(snapshot({ price: 97 }), verdict(), position(), paused, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 97 }),
+      verdict(),
+      position(),
+      paused,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     // A pause on new ideas is not a pause on the stop. An unmanaged position is
     // the one state this desk must never be in.
@@ -381,7 +475,14 @@ describe("planPosition — the kill switch", () => {
   });
 
   it("still takes a profit that is there", () => {
-    const plan = planPosition(snapshot({ price: 104 }), verdict(), position(), paused, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 104 }),
+      verdict(),
+      position(),
+      paused,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("take_profit");
   });
@@ -429,7 +530,14 @@ describe("planPosition — an exit already working", () => {
   });
 
   it("does not re-ask for a stop it already requested", () => {
-    const plan = planPosition(snapshot({ price: 97 }), verdict(), working("stop_out", 1), FREE, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 97 }),
+      verdict(),
+      working("stop_out", 1),
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("hold");
   });
@@ -438,13 +546,27 @@ describe("planPosition — an exit already working", () => {
     // A patient limit exit at a profit target may never fill. Waiting out the
     // window while the position runs through its stop is the one case where
     // asking again is right.
-    const plan = planPosition(snapshot({ price: 97 }), verdict(), working("take_profit", 1), FREE, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 97 }),
+      verdict(),
+      working("take_profit", 1),
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("stop_out");
   });
 
   it("escalates only once — a stop already asked for is never re-sent", () => {
-    const escalated = planPosition(snapshot({ price: 95 }), verdict(), working("stop_out", 2), FREE, portfolio({ openPositions: 1 }), NOW);
+    const escalated = planPosition(
+      snapshot({ price: 95 }),
+      verdict(),
+      working("stop_out", 2),
+      FREE,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(escalated.action).toBe("hold");
   });
@@ -480,23 +602,74 @@ describe("planPosition — an exit already working", () => {
  */
 describe("planPosition — the trail must be worth taking", () => {
   it("does not close a winner for less than the round trip costs", () => {
-    const fees: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 55, trailStartPercent: 1, trailGivebackPercent: 0.5 };
+    const fees: HeadLimits = {
+      ...DEFAULT_HEAD_LIMITS,
+      roundTripFeeBps: 55,
+      trailStartPercent: 1,
+      trailGivebackPercent: 0.5,
+    };
     // Ran to 101.2, now 100.6: the trail has triggered, but net profit after
     // fees is a rounding error. This is the "banked 0.008" trade.
     const ran = position({ peakPrice: 101.2, entryFeeQuote: 0.2 });
-    const plan = planPosition(snapshot({ price: 100.6 }), verdict({ signal: "hold" }), ran, fees, portfolio({ openPositions: 1 }), NOW);
+    const plan = planPosition(
+      snapshot({ price: 100.6 }),
+      verdict({ signal: "hold" }),
+      ran,
+      fees,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("hold");
     expect(plan.notes.join(" ")).toMatch(/under the .* floor; letting it run/);
   });
 
-  it("still trails once the move has cleared its costs", () => {
-    const fees: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 55, trailStartPercent: 1, trailGivebackPercent: 0.5 };
-    const ran = position({ peakPrice: 103, entryFeeQuote: 0.2 });
-    const plan = planPosition(snapshot({ price: 102 }), verdict({ signal: "hold" }), ran, fees, portfolio({ openPositions: 1 }), NOW);
+  it("still trails once the move has cleared its costs and the floor", () => {
+    const fees: HeadLimits = {
+      ...DEFAULT_HEAD_LIMITS,
+      roundTripFeeBps: 55,
+      trailStartPercent: 1,
+      trailGivebackPercent: 0.5,
+    };
+    const ran = position({ quantity: 10, peakPrice: 103, entryFeeQuote: 2 });
+    const plan = planPosition(
+      snapshot({ price: 102 }),
+      verdict({ signal: "hold" }),
+      ran,
+      fees,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
 
     expect(plan.action).toBe("trail_exit");
-    expect(plan.netPnlQuote!).toBeGreaterThan(0.5);
+    expect(plan.netPnlQuote!).toBeGreaterThan(fees.minNetProfitQuote);
+  });
+
+  it("lets a small winner keep running rather than bank under the floor", () => {
+    // The same shape as the trade above, one tenth the size: the trail has
+    // triggered and the position is 1.25 up, which used to be a "win". The
+    // stop is still underneath it, so running it costs nothing that was not
+    // already at risk.
+    const fees: HeadLimits = {
+      ...DEFAULT_HEAD_LIMITS,
+      roundTripFeeBps: 55,
+      trailStartPercent: 1,
+      trailGivebackPercent: 0.5,
+    };
+    const ran = position({ quantity: 1, peakPrice: 103, entryFeeQuote: 0.2 });
+    const plan = planPosition(
+      snapshot({ price: 102 }),
+      verdict({ signal: "hold" }),
+      ran,
+      fees,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
+
+    expect(plan.action).toBe("hold");
+    expect(plan.netPnlQuote!).toBeGreaterThan(0);
+    expect(plan.netPnlQuote!).toBeLessThan(fees.minNetProfitQuote);
+    expect(plan.notes.join(" ")).toMatch(/under the 3.00 floor; letting it run/);
   });
 
   it("ships defaults where reward is larger than risk", () => {
@@ -510,5 +683,95 @@ describe("planPosition — the trail must be worth taking", () => {
     const lockedIn = DEFAULT_HEAD_LIMITS.trailStartPercent - DEFAULT_HEAD_LIMITS.trailGivebackPercent;
 
     expect(lockedIn).toBeGreaterThan(floor);
+  });
+});
+
+/**
+ * The profit floor.
+ *
+ * Every threshold on this desk was a percentage of a ticket that conviction had
+ * already shrunk. Measured over a year of hourly candles on BTC, ETH and PAXG,
+ * that produced 248 winning trades of which 211 banked under three quote units
+ * — against stops costing one to two each. These are the rules that stop a
+ * "win" being worth less than the loss it is paired against.
+ */
+describe("planPosition — the profit floor", () => {
+  const floored: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 0, maxPositionQuote: 250 };
+
+  it("derives the minimum ticket from the floor and the target", () => {
+    // 3 quote units at a 3% target needs 100 staked. The arithmetic is the
+    // whole rule, so it is asserted directly rather than inferred from a plan.
+    expect(minTicketQuote({ minNetProfitQuote: 3, takeProfitPercent: 3 })).toBeCloseTo(100, 9);
+    expect(minTicketQuote({ minNetProfitQuote: 3, takeProfitPercent: 1.5 })).toBeCloseTo(200, 9);
+    expect(minTicketQuote({ minNetProfitQuote: 5, takeProfitPercent: 2 })).toBeCloseTo(250, 9);
+  });
+
+  it("asks for nothing when no floor is set", () => {
+    expect(minTicketQuote({ minNetProfitQuote: 0, takeProfitPercent: 3 })).toBe(0);
+  });
+
+  it("treats a zero target as unreachable rather than dividing by it", () => {
+    expect(minTicketQuote({ minNetProfitQuote: 3, takeProfitPercent: 0 })).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("takes profit when the target is worth the floor", () => {
+    // 250 staked at a 3% target banks 7.50 — over the floor, so the target is
+    // taken exactly as it always was.
+    const held = position({ quantity: 2.5, entryPrice: 100, entryFeeQuote: 0 });
+    const plan = planPosition(
+      snapshot({ price: 103.1 }),
+      verdict(),
+      held,
+      floored,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
+
+    expect(plan.action).toBe("take_profit");
+    expect(plan.netPnlQuote!).toBeGreaterThanOrEqual(floored.minNetProfitQuote);
+  });
+
+  it("holds a position that reached its percentage target but not the floor", () => {
+    // 50 staked hits "3%" at 1.50. The percentage says take it; the money says
+    // it is half a stop. A limit lowered under a position already open is how
+    // this reaches the exit rules at all, so it is checked here and not only
+    // at entry.
+    const small = position({ quantity: 0.5, entryPrice: 100, entryFeeQuote: 0 });
+    const plan = planPosition(
+      snapshot({ price: 104 }),
+      verdict({ signal: "hold" }),
+      small,
+      floored,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
+
+    expect(plan.action).toBe("hold");
+    expect(plan.netPnlQuote!).toBeGreaterThan(0);
+    expect(plan.netPnlQuote!).toBeLessThan(floored.minNetProfitQuote);
+  });
+
+  it("never lets the floor block a stop out", () => {
+    // The one thing a profit floor must not do is make a loser harder to
+    // leave. A stop is a risk exit and answers to nothing here.
+    const small = position({ quantity: 0.5, entryPrice: 100, entryFeeQuote: 0 });
+    const plan = planPosition(snapshot({ price: 97 }), verdict(), small, floored, portfolio({ openPositions: 1 }), NOW);
+
+    expect(plan.action).toBe("stop_out");
+  });
+
+  it("never lets the floor block a flatten", () => {
+    const small = position({ quantity: 0.5, entryPrice: 100, entryFeeQuote: 0 });
+    const halted = portfolio({ openPositions: 1, realizedPnlToday: -floored.maxDailyLossQuote });
+    const plan = planPosition(snapshot({ price: 100 }), verdict(), small, floored, halted, NOW);
+
+    expect(plan.action).toBe("flatten");
+  });
+
+  it("ships a floor the default cap can actually fund", () => {
+    // A floor the cap cannot reach is a head that refuses every trade and
+    // blames the operator. The two defaults have to be consistent with each
+    // other, and this is the assertion that keeps them that way.
+    expect(minTicketQuote(DEFAULT_HEAD_LIMITS)).toBeLessThanOrEqual(DEFAULT_HEAD_LIMITS.maxPositionQuote);
   });
 });
