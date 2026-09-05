@@ -56,6 +56,7 @@ import type { IExchange, IExchangeCredentials } from "../../types/index.js";
 import { cache } from "../../cache.js";
 import { fetcher } from "../../utils/next/fetcher.js";
 import { normalize } from "./normalize.js";
+import { conformOrder, type ConformedOrder, type MarketRules } from "./conform.js";
 import { exchangeCodeMapCCXT } from "../../client/constants.js";
 
 export class CCXTExchange implements IExchange {
@@ -110,6 +111,42 @@ export class CCXTExchange implements IExchange {
 
   async destroy() {
     await this.ccxt.close();
+  }
+
+  /**
+   * Round an order to what this venue accepts, and say whether it is still
+   * sendable.
+   *
+   * ccxt already knows every exchange's precision mode, so the rounding is
+   * delegated to it and only the judgement — is what remains above the venue's
+   * minimums — is ours. Markets must be loaded for any of this to be known; when
+   * they are not, or the symbol is unknown, the order passes through unchanged
+   * rather than being blocked on missing metadata. That is the safe failure:
+   * refusing every trade because a market list did not load would be a worse
+   * outage than sending an order the venue may round itself.
+   */
+  async conformOrder(symbol: string, quantity: number, price: number | null): Promise<ConformedOrder> {
+    try {
+      await this.loadMarkets();
+      const market = this.ccxt.market(symbol);
+
+      const rules: MarketRules = {
+        amountStep: (market.precision?.amount as number | undefined) ?? null,
+        priceTick: (market.precision?.price as number | undefined) ?? null,
+        minAmount: market.limits?.amount?.min ?? null,
+        minCost: market.limits?.cost?.min ?? null,
+      };
+
+      return conformOrder(
+        quantity,
+        price,
+        rules,
+        (value) => Number(this.ccxt.amountToPrecision(symbol, value)),
+        (value) => Number(this.ccxt.priceToPrecision(symbol, value)),
+      );
+    } catch {
+      return { quantity, price, ok: true };
+    }
   }
 
   async loadMarkets(): Promise<Record<string, Market>> {

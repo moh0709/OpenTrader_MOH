@@ -78,6 +78,60 @@ async function passiveExitPrice(exchange: IExchange, symbol: string, exitSide: X
 }
 
 /**
+ * How much of this position can actually be sold.
+ *
+ * The exit used to be sized at the entry quantity, which is the amount that was
+ * bought and not the amount that is held. Most venues charge a spot buy fee in
+ * the base asset — Binance does by default — so the account receives slightly
+ * less than it purchased, and an order to sell the full entry quantity is an
+ * order for coins that are not there. The venue rejects it, and the position
+ * that could not be closed is the one nobody notices until it matters.
+ *
+ * Invisible in paper, where fees are charged in quote and the entry quantity is
+ * exactly what is held — so paper is skipped rather than asked, because
+ * `PaperExchange` tracks no base balances at all and would answer zero.
+ *
+ * Capped, never raised: if the balance somehow exceeds the entry, that surplus
+ * belongs to something else and this deal has no claim on it. A balance we
+ * cannot read falls back to the entry quantity, which is the behaviour that has
+ * always been there.
+ */
+async function sellableQuantity(
+  exchange: IExchange,
+  symbol: string,
+  entryOrder: Order,
+): Promise<number> {
+  if (entryOrder.side !== XOrderSide.Buy) return entryOrder.quantity;
+  if ((exchange as { isPaper?: boolean }).isPaper) return entryOrder.quantity;
+
+  const base = symbol.split("/")[0];
+  if (!base) return entryOrder.quantity;
+
+  try {
+    const assets = await exchange.accountAssets();
+    const held = assets.find((asset) => asset.currency === base);
+    if (!held) return entryOrder.quantity;
+
+    const available = held.availableBalance ?? held.balance;
+    if (!Number.isFinite(available) || available <= 0) return entryOrder.quantity;
+
+    const sellable = Math.min(entryOrder.quantity, available);
+    if (sellable < entryOrder.quantity) {
+      logger.info(
+        `[closeSmartTrade] Selling ${sellable} ${base} rather than the ${entryOrder.quantity} bought; ` +
+          `the venue took its fee in ${base}.`,
+      );
+    }
+
+    return sellable;
+  } catch (err) {
+    logger.warn(`[closeSmartTrade] Could not read the ${base} balance (${(err as Error).message}); exiting the full entry size.`);
+
+    return entryOrder.quantity;
+  }
+}
+
+/**
  * Force-close a single deal.
  *
  * Safe to call whether or not the owning bot is running, and safe to call twice
@@ -147,7 +201,7 @@ export async function closeSmartTrade(id: number, mode: CloseMode = "market"): P
 
   // --- Case 2: we hold inventory. Cancel resting exits, then exit at market. -
   const exitSide = entryOrder.side === XOrderSide.Buy ? XOrderSide.Sell : XOrderSide.Buy;
-  const exitQuantity = entryOrder.quantity;
+  const exitQuantity = await sellableQuantity(exchange, symbol, entryOrder);
 
   // A resting stop loss must go, or it can fire against the exit we just placed.
   const restingStopLoss = refreshed.stopLossOrder;

@@ -229,12 +229,46 @@ export async function openSmartTrade(
     return refuse(`Could not establish a price for ${symbol}.`);
   }
 
-  const quantity = params.quantity ?? (params.quoteAmount as number) / referencePrice;
-  const notionalQuote = quantity * referencePrice;
+  const rawQuantity = params.quantity ?? (params.quoteAmount as number) / referencePrice;
 
-  if (quantity <= 0) {
+  if (rawQuantity <= 0) {
     rejections.push("size resolved to zero");
     return refuse("The requested size resolves to zero.");
+  }
+
+  /*
+   * Make it an order the venue will actually take.
+   *
+   * A size computed as `quoteAmount / price` is a float with no relationship to
+   * the market's step size, and a price to eight decimals means nothing to a
+   * venue quoting in ticks. Paper accepted all of it; a real exchange rejects
+   * the order, or rounds it into a different trade. Rounding happens here, once,
+   * before any limit is checked — so the caps are enforced against the size that
+   * will actually be sent rather than the one that was requested.
+   *
+   * Quantity only ever rounds down, and an order falling under the venue's
+   * minimum is refused rather than rounded up to meet it: a minimum is not
+   * permission to exceed the risk limits.
+   */
+  const conformed = await exchange.conformOrder?.(
+    symbol,
+    rawQuantity,
+    params.orderType === "limit" ? (params.price ?? null) : null,
+  );
+
+  if (conformed && !conformed.ok) {
+    const why = conformed.reason ?? "the venue would not accept this order";
+    rejections.push(why);
+
+    return refuse(`${symbol}: ${why}`);
+  }
+
+  const quantity = conformed?.quantity ?? rawQuantity;
+  const limitPrice = conformed?.price ?? params.price ?? null;
+  const notionalQuote = quantity * referencePrice;
+
+  if (conformed?.adjusted) {
+    logger.info(`[openSmartTrade] Conformed ${symbol} to the venue: ${conformed.adjusted}`);
   }
 
   // --- Limits. Checked before anything is written or placed. ---------------
@@ -270,7 +304,7 @@ export async function openSmartTrade(
       type: params.orderType === "market" ? XOrderType.Market : XOrderType.Limit,
       entityType: XEntityType.EntryOrder,
       side,
-      price: params.orderType === "limit" ? params.price : null,
+      price: params.orderType === "limit" ? limitPrice : null,
       quantity,
       symbol,
       exchangeAccountId: bot.exchangeAccountId,

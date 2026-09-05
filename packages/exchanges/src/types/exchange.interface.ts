@@ -1,3 +1,4 @@
+import type { ConformedOrder } from "../exchanges/ccxt/conform.js";
 import {
   IAccountAsset,
   IGetCandlesticksRequest,
@@ -54,6 +55,13 @@ export interface IExchange {
   getOpenOrders: (body: IGetOpenOrdersRequest) => Promise<IGetOpenOrdersResponse>;
   getClosedOrders: (body: IGetClosedOrdersRequest) => Promise<IGetClosedOrdersResponse>;
   getTicker: (symbol: string) => Promise<ITicker>;
+
+  /**
+   * Round an order to the venue's step and tick, and report whether what
+   * remains clears its minimums. Optional: an exchange that cannot answer is
+   * skipped rather than blocking the trade.
+   */
+  conformOrder?: (symbol: string, quantity: number, price: number | null) => Promise<ConformedOrder>;
   getMarketPrice: (params: IGetMarketPriceRequest) => Promise<IGetMarketPriceResponse>;
   getCandlesticks: (params: IGetCandlesticksRequest) => Promise<ICandlestick[]>;
   getSymbols: () => Promise<ISymbolInfo[]>;
