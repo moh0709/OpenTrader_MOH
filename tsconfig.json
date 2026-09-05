@@ -39,6 +39,9 @@
       "path": "packages/logger"
     },
     {
+      "path": "packages/market-intel"
+    },
+    {
       "path": "packages/mcp-server"
     },
     {
