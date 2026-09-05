@@ -43,6 +43,7 @@ import {
 } from "@opentrader/types";
 import { PaperOrder, xprisma } from "@opentrader/db";
 import { CCXTExchange } from "./exchange.js";
+import { paperFeeQuote } from "./paper-fees.js";
 
 const ORDER_PLACEMENT_DELAY = 100;
 const ORDER_FULFILLMENT_DELAY = 200;
@@ -91,32 +92,38 @@ export class PaperExchange extends CCXTExchange {
           }
 
           if (order.side === "buy" && order.price! >= (ticker.ask ?? ticker.last)!) {
+            const fillPrice = (ticker.ask ?? ticker.last)!;
+            const fee = paperFeeQuote(order.quantity, fillPrice);
             const filledOrder = await xprisma.paperOrder.update({
               where: { id: order.id },
               data: {
                 status: "filled" satisfies OrderStatus,
-                filledPrice: ticker.ask ?? ticker.last,
+                filledPrice: fillPrice,
+                fee,
                 lastTradeTimestamp: new Date(),
               },
             });
             this.openOrders = this.openOrders.filter((openOrder) => openOrder.id !== order.id); // remove from open orders
             console.log(
-              `[${this.exchangeCode} Paper] BUY order ID:${order.id} filled at price ${ticker.ask ?? ticker.last} ${order.symbol}`,
+              `[${this.exchangeCode} Paper] BUY order ID:${order.id} filled at price ${fillPrice} ${order.symbol} (fee ${fee.toFixed(4)})`,
             );
 
             this.emitOrder(filledOrder);
           } else if (order.side === "sell" && order.price! <= (ticker.bid ?? ticker.last)!) {
+            const fillPrice = (ticker.bid ?? ticker.last)!;
+            const fee = paperFeeQuote(order.quantity, fillPrice);
             const filledOrder = await xprisma.paperOrder.update({
               where: { id: order.id },
               data: {
                 status: "filled" satisfies OrderStatus,
-                filledPrice: ticker.bid ?? ticker.last,
+                filledPrice: fillPrice,
+                fee,
                 lastTradeTimestamp: new Date(),
               },
             });
             this.openOrders = this.openOrders.filter((openOrder) => openOrder.id !== order.id); // remove from open orders
             console.log(
-              `[${this.exchangeCode} Paper] SELL order ID:${order.id} filled at price ${ticker.bid ?? ticker.last} ${order.symbol}`,
+              `[${this.exchangeCode} Paper] SELL order ID:${order.id} filled at price ${fillPrice} ${order.symbol} (fee ${fee.toFixed(4)})`,
             );
 
             this.emitOrder(filledOrder);
@@ -268,11 +275,15 @@ export class PaperExchange extends CCXTExchange {
     });
 
     const ticker = await this.ccxt.fetchTicker(params.symbol);
+    // Crossing the spread: a buy lifts the ask, a sell hits the bid. The fee is
+    // charged on top of that, the same as it would be on a live venue.
+    const fillPrice = (params.side === "buy" ? ticker.ask : ticker.bid) ?? ticker.last;
     const filledOrder = await xprisma.paperOrder.update({
       where: { id: order.id },
       data: {
         status: "filled" satisfies OrderStatus,
-        filledPrice: params.side === "buy" ? ticker.ask : ticker.bid,
+        filledPrice: fillPrice,
+        fee: paperFeeQuote(params.quantity, fillPrice ?? 0),
         lastTradeTimestamp: new Date(),
       },
     });
