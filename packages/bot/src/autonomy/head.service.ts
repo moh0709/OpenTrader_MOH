@@ -621,7 +621,22 @@ export class TradingHead {
        * Whichever fires first is correct, and `closeSmartTrade` cancels this
        * one before placing a market exit, so they cannot both sell.
        */
-      const target = price * (1 + (config.limits.takeProfitPercent + config.limits.roundTripFeeBps / 100) / 100);
+      /*
+       * Which exit gets to live at the exchange.
+       *
+       * Only one can: on spot, two sell orders against the same coins means the
+       * venue rejects the second, and this fork has no native OCO. Every entry
+       * used to rest its take profit, which insured the upside against this
+       * process dying and left the downside to a loop that dies with it.
+       *
+       * So the stop rests and the target does not. The head re-decides every
+       * pass and takes profit itself long before a resting limit would matter —
+       * and `closeSmartTrade` cancels this stop before placing that exit, so the
+       * two can never both sell. What changes is only what happens while nothing
+       * is watching: the position now has a floor under it rather than a ceiling
+       * over it.
+       */
+      const stopPrice = price * (1 - (config.limits.stopLossPercent + config.limits.roundTripFeeBps / 100) / 100);
 
       /*
        * The stop that survives the daemon.
@@ -636,7 +651,7 @@ export class TradingHead {
        * never fires, and `closeSmartTrade` cancels it before placing any exit of
        * its own, so the two can never both sell.
        */
-      const stop = price * (1 - (config.limits.stopLossPercent + config.limits.roundTripFeeBps / 100) / 100);
+
 
       /*
        * Rest at the bid, or cross the spread.
@@ -672,8 +687,7 @@ export class TradingHead {
           quoteAmount: plan.sizeQuote,
           orderType: entryPrice === null ? "market" : "limit",
           price: entryPrice ?? undefined,
-          takeProfitPrice: Number(target.toFixed(8)),
-          stopLossPrice: Number(stop.toFixed(8)),
+          stopLossPrice: Number(stopPrice.toFixed(8)),
         },
         doorLimits(config),
         AUTOPILOT_REF_PREFIX,

@@ -345,3 +345,53 @@ describe("openSmartTrade — the resting stop", () => {
     expect(stop.stopPrice).toBe(110);
   });
 });
+
+/**
+ * A stop with no take profit beside it.
+ *
+ * This is the shape the trading head now opens with, and it is deliberate. Only
+ * one exit can rest on spot — two sell orders against the same coins and the
+ * venue refuses the second — so the choice is which one survives the daemon
+ * dying, and a missed profit costs opportunity where a missed stop costs
+ * capital. The head takes profit itself on every pass; nothing takes the stop.
+ */
+describe("openSmartTrade — a resting stop as the only exit", () => {
+  const ordersOf = (i = 0) =>
+    (state.created[i].orders as { createMany: { data: Record<string, unknown> }[] } | { createMany: { data: Record<string, unknown>[] } })
+      .createMany.data as Record<string, unknown>[];
+
+  it("opens with an entry and a stop, and no take profit", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, stopLossPrice: 89.45 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const kinds = ordersOf().map((o) => o.entityType);
+    expect(kinds).toContain("EntryOrder");
+    expect(kinds).toContain("StopLossOrder");
+    expect(kinds).not.toContain("TakeProfitOrder");
+  });
+
+  it("records the trade as having no resting take profit", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, stopLossPrice: 89.45 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    // The trade's own shape has to agree with its orders, or the executor's
+    // state machine reads a take profit that was never created.
+    expect(state.created[0].takeProfitType).toBe("None");
+  });
+
+  it("keeps the stop on the sell side of a long, below the entry", async () => {
+    await openSmartTrade(
+      { botId: 1, side: "buy", quantity: 0.1, orderType: "limit", price: 100, stopLossPrice: 89.45 },
+      { ...DEFAULT_MANUAL_LIMITS, maxNotionalQuote: 1000 },
+    );
+
+    const stop = ordersOf().find((o) => o.entityType === "StopLossOrder")!;
+    expect(stop.side).toBe("Sell");
+    expect(stop.stopPrice).toBe(89.45);
+    expect(Number(stop.stopPrice)).toBeLessThan(100);
+  });
+});

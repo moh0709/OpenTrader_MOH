@@ -140,6 +140,35 @@ export class TradeExecutor implements ISmartTradeExecutor {
 
         return true;
       });
+    } else if (entryOrder.status === "Filled" && !takeProfitOrder && stopLossOrder?.status === "Idle") {
+      /*
+       * A filled entry whose only exit is a stop: arm it at the venue now.
+       *
+       * The usual shape here is the opposite — a resting take profit, with the
+       * stop held back and placed only once this process sees the price cross
+       * it. That is a stop existing solely inside a running daemon, and it
+       * protects nothing during the one event it is for. If the process dies,
+       * the winner stays insured by its resting limit and the loser runs.
+       * Upside covered, downside naked, which is backwards.
+       *
+       * Spot balance locking is why both cannot rest: two sell orders against
+       * the same coins and the venue refuses the second, absent native OCO. So
+       * the question is only which one lives at the exchange, and a missed
+       * profit costs opportunity where a missed stop costs capital.
+       *
+       * Only trades that shipped without a take profit take this path, so grids
+       * and DCA keep the behaviour they were written for.
+       */
+      const slOrder = new OrderExecutor(stopLossOrder, this.exchange, this.smartTrade.symbol);
+      await slOrder.place();
+      await this.pull();
+
+      logger.info(
+        `[TradeExecutor] Armed stop loss ${stopLossOrder.side} ${stopLossOrder.quantity} ${baseCurrency} ` +
+          `at ${stopLossOrder.stopPrice} for [ST - ${this.smartTrade.ref}]`,
+      );
+
+      return true;
     } else if (entryOrder.status === "Filled" && takeProfitOrder?.status === "Idle") {
       // Grid spacing is set in price, so a tight grid on a small quantity can
       // close for fractions of a cent. Lift the exit to the price that actually
