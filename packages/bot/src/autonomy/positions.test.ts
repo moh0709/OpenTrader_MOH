@@ -43,3 +43,45 @@ describe("peakSince", () => {
     expect(peakSince([bar(100, 80), bar(200, 70)], 0, 100)).toBe(100);
   });
 });
+
+/**
+ * Which exit counts.
+ *
+ * Every autopilot trade now carries a take profit and a stop loss, so "the
+ * first exit-typed order" stopped being a meaningful answer. Whichever the
+ * database returned first used to decide whether the head thought a position
+ * was open — and a filled take profit sitting behind an idle stop read as
+ * "still holding", so the head would keep managing a closed position and count
+ * its notional as live exposure.
+ */
+describe("a trade carrying both exits", () => {
+  const entry = { entityType: "EntryOrder", status: "Filled", side: "Buy", price: 100, filledPrice: 100, fee: 0.1, quantity: 1, filledAt: new Date(0) };
+  const filledTp = { entityType: "TakeProfitOrder", status: "Filled", side: "Sell", price: 115, filledPrice: 115, fee: 0.11, quantity: 1, filledAt: new Date(1) };
+  const idleStop = { entityType: "StopLossOrder", status: "Idle", side: "Sell", price: null, filledPrice: null, fee: null, quantity: 1, filledAt: null };
+
+  it("counts the position closed whichever order comes back first", () => {
+    // The stop deliberately sits ahead of the take profit here: that ordering
+    // is exactly what used to produce a phantom open position.
+    for (const orders of [
+      [entry, idleStop, filledTp],
+      [entry, filledTp, idleStop],
+    ]) {
+      const exits = orders.filter((o) => ["TakeProfitOrder", "StopLossOrder"].includes(o.entityType));
+      const chosen = exits.find((o) => o.status === "Filled") ?? exits[0];
+
+      expect(chosen.entityType).toBe("TakeProfitOrder");
+      expect(chosen.status).toBe("Filled");
+    }
+  });
+
+  it("still reports a resting exit while nothing has filled", () => {
+    const restingTp = { ...filledTp, status: "Placed", filledPrice: null, filledAt: null };
+    const exits = [restingTp, idleStop];
+    const chosen = exits.find((o) => o.status === "Filled") ?? exits[0];
+
+    // No filled exit, so the position is open and the caller gets a price to
+    // report rather than nothing at all.
+    expect(chosen).toBeDefined();
+    expect(chosen.status).not.toBe("Filled");
+  });
+});

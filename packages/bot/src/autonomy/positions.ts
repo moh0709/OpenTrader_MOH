@@ -43,8 +43,24 @@ function entryOf(trade: TradeRow): OrderRow | undefined {
   return trade.orders.find((order) => order.entityType === XEntityType.EntryOrder);
 }
 
+/**
+ * The exit that closed this trade, or one that might.
+ *
+ * A trade now carries both a take profit and a stop loss, and "the first exit
+ * in the row order" stopped being a meaningful answer the moment there were
+ * two of them. Whichever the database happened to return first decided whether
+ * the head thought a position was open — so a filled take profit sitting behind
+ * an idle stop read as "still holding", and the head would keep managing a
+ * position it had already closed while counting its notional as live exposure.
+ *
+ * A position is closed if *any* exit filled. That is the question being asked,
+ * so it is the one answered here; an unfilled exit comes back only when there is
+ * no filled one, for the resting price the caller reports.
+ */
 function exitOf(trade: TradeRow): OrderRow | undefined {
-  return trade.orders.find((order) => EXIT_TYPES.includes(order.entityType));
+  const exits = trade.orders.filter((order) => EXIT_TYPES.includes(order.entityType));
+
+  return exits.find((order) => order.status === XOrderStatus.Filled) ?? exits[0];
 }
 
 /**
