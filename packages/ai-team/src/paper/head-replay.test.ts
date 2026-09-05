@@ -196,6 +196,8 @@ describe("replayHead", () => {
           symbol: "A",
           candles: 0,
           decisions: 0,
+          entriesPlanned: 3,
+          entriesFilled: 3,
           openAtEnd: null,
           buyHoldReturnPct: 0,
           stats: {} as never,
@@ -236,5 +238,91 @@ describe("replayHead", () => {
     expect(noTrades.profitFactor).toBe(0);
     expect(noTrades.expectancy).toBe(0);
     expect(noTrades.winRate).toBe(0);
+  });
+});
+
+/**
+ * Maker entries.
+ *
+ * The daemon crosses the spread on every entry. The alternative — resting a
+ * limit at the decision price — saves the spread and pays the maker fee, but
+ * only fills when the market comes down to meet it, which is exactly when the
+ * trade is likelier to be going wrong. The model here does not assume that
+ * away: a resting bid fills if and only if the next bar's low reaches it.
+ */
+describe("replayHead — maker entries", () => {
+  it("fills at the decision price with no slippage when the next bar trades through it", async () => {
+    // A 0.6% wick on every bar: the bar after each decision dips below the
+    // previous close, so every resting bid is reached.
+    const result = await replayHead("TEST/USDT", series(climb(40, 60, 0.35), 0.006), {
+      limits,
+      paper,
+      council: bullish,
+      warmup: 35,
+      entry: { fill: "maker", makerFeeBps: 8 },
+    });
+
+    expect(result.entriesPlanned).toBeGreaterThan(0);
+    expect(result.entriesFilled).toBeGreaterThan(0);
+    expect(result.trades.length).toBeGreaterThan(0);
+
+    const first = result.trades[0];
+    // The fee is the maker rate on the notional, and the entry carries none of
+    // the taker model's adverse slippage.
+    expect(first.entryFee).toBeCloseTo(first.notional * 0.0008, 8);
+  });
+
+  it("never fills in a market that only gaps away from the bid", async () => {
+    // A 0.1% wick on a 0.35% climb: no bar ever comes back to the previous
+    // close, so a resting bid sits there and is cancelled every bar. Deciding
+    // starts inside the climb — the flat warm-up zigzags, and a zigzag does
+    // come back down, which is a different test.
+    const result = await replayHead("TEST/USDT", series(climb(40, 60, 0.35), 0.001), {
+      limits,
+      paper,
+      council: bullish,
+      warmup: 41,
+      entry: { fill: "maker" },
+    });
+
+    expect(result.entriesPlanned).toBeGreaterThan(0);
+    expect(result.entriesFilled).toBe(0);
+    expect(result.trades).toHaveLength(0);
+    expect(result.openAtEnd).toBeNull();
+  });
+
+  it("leaves the taker path exactly as it was", async () => {
+    const result = await replayHead("TEST/USDT", series(climb(40, 60, 0.35)), {
+      limits,
+      paper,
+      council: bullish,
+      warmup: 35,
+    });
+
+    // A market order always fills, so planned and filled agree, and every
+    // entry paid the taker rate on a slipped price.
+    expect(result.entriesFilled).toBe(result.entriesPlanned);
+    for (const trade of result.trades) {
+      expect(trade.entryFee).toBeCloseTo(trade.notional * (paper.feeBps / 10_000), 8);
+    }
+  });
+
+  it("does not spend the day's budget on an order that never filled", async () => {
+    // Every planned entry is cancelled unfilled, so nothing should have been
+    // charged against the opening allowance — the daemon reads that budget
+    // from executed decisions, and an unfilled rest is not one.
+    const tight = { ...limits, maxDailyOpenNotionalQuote: limits.maxPositionQuote * 1.5 };
+    const result = await replayHead("TEST/USDT", series(climb(40, 200, 0.35), 0.001), {
+      limits: tight,
+      paper,
+      council: bullish,
+      warmup: 41,
+      entry: { fill: "maker" },
+    });
+
+    // If unfilled rests were charged, the budget would be exhausted after two
+    // bars and planning would stop; it keeps planning because nothing spent it.
+    expect(result.entriesPlanned).toBeGreaterThan(2);
+    expect(result.entriesFilled).toBe(0);
   });
 });

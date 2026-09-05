@@ -86,6 +86,9 @@ export type HeadReplayResult = {
   symbol: string;
   candles: number;
   decisions: number;
+  /** Entries the planner asked for, and how many the market actually filled. */
+  entriesPlanned: number;
+  entriesFilled: number;
   trades: HeadTrade[];
   stats: HeadReplayStats;
   /** Still open when the data ran out, marked to the last close. */
@@ -105,6 +108,22 @@ export type HeadReplayOptions = {
    * Reporting only — it does not change any decision.
    */
   profitFloorQuote?: number;
+  /**
+   * How an entry reaches the book.
+   *
+   * `taker` is what the daemon does today: a market order that fills at the
+   * decision price plus slippage and pays the taker fee. `maker` rests a limit
+   * at the decision price and fills only if the next bar trades through it —
+   * at that price, with no slippage, for the maker fee. An order the next bar
+   * never reaches is cancelled, and the head simply decides again.
+   *
+   * The maker model is deliberately conservative in the one way that matters:
+   * a resting bid fills when price comes down to it, which is exactly when the
+   * trade is more likely to be going wrong. That adverse selection is not
+   * assumed away here; it falls out of the fill rule and shows up in the
+   * results, which is the point of modelling it at all.
+   */
+  entry?: { fill: "taker" | "maker"; makerFeeBps?: number };
 };
 
 /** UTC midnight for an epoch, matching the day boundary `summariseBook` uses. */
@@ -212,8 +231,16 @@ export async function replayHead(
 
   const trades: HeadTrade[] = [];
 
+  const entryMode = options.entry?.fill ?? "taker";
+  const makerFeeRate = (options.entry?.makerFeeBps ?? paper.feeBps) / 10_000;
+
   let position: OpenPosition | null = null;
   let entryConfidence = 0;
+  let entriesPlanned = 0;
+  let entriesFilled = 0;
+
+  /** A maker entry resting from the previous bar, waiting for a fill or a cancel. */
+  let pending: { price: number; sizeQuote: number; confidence: number } | null = null;
 
   let realizedPnlToday = 0;
   let openedNotionalToday = 0;
@@ -238,6 +265,35 @@ export async function replayHead(
       realizedPnlToday = 0;
       openedNotionalToday = 0;
       consecutiveLosses = 0;
+    }
+
+    // A limit resting from the previous bar either filled during this one or
+    // it did not. Resolved before the decision, because that is when the desk
+    // would see it: the fill happened intra-bar, the next look is at the close.
+    if (pending) {
+      if (bar.low <= pending.price) {
+        const quantity = pending.sizeQuote / pending.price;
+        const notional = quantity * pending.price;
+
+        position = {
+          smartTradeId: trades.length + 1,
+          symbol,
+          quantity,
+          entryPrice: pending.price,
+          entryFeeQuote: notional * makerFeeRate,
+          openedAt: now,
+          peakPrice: pending.price,
+          takeProfitPrice: null,
+          exitRequestedAt: null,
+          exitRequestedAction: null,
+        };
+        entryConfidence = pending.confidence;
+        entriesFilled += 1;
+        openedNotionalToday += notional;
+        lastActionAt = now;
+      }
+
+      pending = null;
     }
 
     const live: OpenPosition | null = position
@@ -275,9 +331,21 @@ export async function replayHead(
       // the next pass. Skipping it here keeps the replay honest about that.
       if (live) continue;
 
+      entriesPlanned += 1;
+
+      if (entryMode === "maker") {
+        // Rest at the decision price. Nothing is held until the next bar says
+        // so, and the day's budget is not spent on an order that may never
+        // fill — the daemon reads that budget from executed decisions too.
+        pending = { price, sizeQuote: plan.sizeQuote, confidence: plan.confidence };
+        continue;
+      }
+
       const fillPrice = price * (1 + slip);
       const quantity = plan.sizeQuote / fillPrice;
       if (!(quantity > 0)) continue;
+
+      entriesFilled += 1;
 
       const notional = quantity * fillPrice;
       const fee = notional * feeRate;
@@ -337,6 +405,8 @@ export async function replayHead(
     symbol,
     candles: candles.length,
     decisions,
+    entriesPlanned,
+    entriesFilled,
     trades,
     stats: summarise(trades, floor),
     openAtEnd: position
