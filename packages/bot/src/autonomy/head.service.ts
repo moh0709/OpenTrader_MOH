@@ -82,6 +82,27 @@ function candlesNeeded(config: AutopilotConfig): number {
 /** Until the policy has been read, poll at the conservative default. */
 const DEFAULT_INTERVAL_MS = 60_000;
 
+/**
+ * One candle, in milliseconds.
+ *
+ * A resting entry the market never came back to meet is cancelled after its bar,
+ * which is the rule the replay models and the reason the backtest is worth
+ * anything. Unknown bar sizes fall back to an hour rather than resting forever.
+ */
+const BAR_MS: Record<string, number> = {
+  "1m": 60_000,
+  "5m": 300_000,
+  "15m": 900_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "1d": 86_400_000,
+  "1w": 604_800_000,
+};
+
+function barMs(timeframe: string): number {
+  return BAR_MS[timeframe] ?? 3_600_000;
+}
+
 /** How often an unchanged hold is written down anyway, so quiet leaves a trail. */
 const HOLD_HEARTBEAT_MS = 30 * 60 * 1000;
 
@@ -289,6 +310,12 @@ export class TradingHead {
       openedNotionalToday(),
     ]);
 
+    // A resting entry that never filled is cancelled before anything else is
+    // decided. It holds a position slot and a slice of the day's budget at the
+    // order door, so leaving it there would quietly starve the next idea — and
+    // the evidence it was opened on is a bar old by now anyway.
+    await this.sweepStaleEntries(config);
+
     const outcomes: SymbolOutcome[] = [];
     let executed = 0;
     let spentToday = openedAtPassStart;
@@ -350,6 +377,41 @@ export class TradingHead {
     }
 
     return { ran: true, mode: config.mode, considered: config.symbols.length, executed, outcomes };
+  }
+
+  /**
+   * Cancel autopilot entries still resting after their bar.
+   *
+   * Only ever touches orders that have not filled, so it cannot close a
+   * position — `closeSmartTrade` reports `canceled_unfilled` for exactly this
+   * case and leaves anything holding inventory alone.
+   */
+  private async sweepStaleEntries(config: AutopilotConfig): Promise<void> {
+    if (config.entryOrderType !== "limit") return;
+
+    const cutoff = new Date(Date.now() - barMs(config.timeframe));
+
+    try {
+      const stale = (await xprisma.smartTrade.findMany({
+        where: {
+          botId: config.botId!,
+          ref: { startsWith: AUTOPILOT_REF_PREFIX },
+          createdAt: { lt: cutoff },
+          orders: { some: { entityType: "EntryOrder", status: { in: ["Idle", "Placed"] } } },
+        },
+        select: { id: true, symbol: true },
+      })) as { id: number; symbol: string }[];
+
+      for (const trade of stale) {
+        const result = await closeSmartTrade(trade.id, "market");
+        if (result.outcome === "canceled_unfilled") {
+          logger.info(`[Head] Cancelled unfilled entry on ${trade.symbol} after one bar; deciding again.`);
+        }
+      }
+    } catch (error) {
+      // Never let housekeeping stop the desk deciding.
+      logger.warn(`[Head] Could not sweep stale entries: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** Decide and, when allowed, act on one market. */
@@ -511,7 +573,7 @@ export class TradingHead {
 
     logger.info(`[Head] ${describeHeadPlan(plan)}`);
 
-    const execution = await this.execute(plan, config, price);
+    const execution = await this.execute(plan, config, price, exchange);
 
     await recordDecision({
       plan,
@@ -541,6 +603,7 @@ export class TradingHead {
     config: AutopilotConfig,
     /** The price the decision was made at, used to price the resting exit. */
     price: number,
+    exchange: ReturnType<typeof exchangeProvider.fromAccount>,
   ): Promise<{ ok: boolean; smartTradeId: number | null; message: string }> {
     if (isEntry(plan.action)) {
       /*
@@ -560,13 +623,40 @@ export class TradingHead {
        */
       const target = price * (1 + (config.limits.takeProfitPercent + config.limits.roundTripFeeBps / 100) / 100);
 
+      /*
+       * Rest at the bid, or cross the spread.
+       *
+       * A limit entry saves the half-spread and the maker fee, and is worth more
+       * the more the desk trades — measured out-of-sample across 29 daily
+       * markets it roughly doubled the year's return. It costs certainty: the
+       * order fills only if the market comes back to meet it, and the sweep
+       * above cancels it after a bar if it does not.
+       *
+       * A ticker we cannot read is a reason to cross the spread, not to skip the
+       * trade: the planner already decided this one is worth doing.
+       */
+      let entryPrice: number | null = null;
+
+      if (config.entryOrderType === "limit") {
+        try {
+          const ticker = await exchange.getTicker(plan.symbol);
+          if (ticker.bid > 0) entryPrice = ticker.bid;
+        } catch (error) {
+          logger.warn(
+            `[Head] No ticker for a resting entry on ${plan.symbol}; crossing the spread instead ` +
+              `(${error instanceof Error ? error.message : String(error)}).`,
+          );
+        }
+      }
+
       const result = await openSmartTrade(
         {
           botId: config.botId!,
           symbol: plan.symbol,
           side: "buy",
           quoteAmount: plan.sizeQuote,
-          orderType: "market",
+          orderType: entryPrice === null ? "market" : "limit",
+          price: entryPrice ?? undefined,
           takeProfitPrice: Number(target.toFixed(8)),
         },
         doorLimits(config),

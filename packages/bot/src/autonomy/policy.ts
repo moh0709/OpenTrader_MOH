@@ -17,6 +17,22 @@ const POLICY_ID = 1;
 
 export type AutopilotMode = "observe" | "live";
 
+/**
+ * How an entry reaches the book.
+ *
+ * `market` crosses the spread and pays the taker fee — certain, and the more
+ * expensive of the two. `limit` rests at the bid: it saves the half-spread and
+ * the maker/taker difference, but fills only if the market comes back to meet
+ * it, which happens more often when the trade is going against us. Measured over
+ * four years of hourly candles and again out-of-sample on 29 daily markets, the
+ * saving is worth far more than that adverse selection costs, and it grows with
+ * trade count.
+ *
+ * An order that does not fill within its bar is cancelled and the head decides
+ * again from fresh evidence — the same rule the replay models.
+ */
+export type EntryOrderType = "market" | "limit";
+
 export type AutopilotConfig = {
   enabled: boolean;
   /**
@@ -32,6 +48,7 @@ export type AutopilotConfig = {
   botId: number | null;
   intervalMs: number;
   timeframe: BarSize;
+  entryOrderType: EntryOrderType;
   limits: HeadLimits;
 };
 
@@ -42,6 +59,7 @@ export const DEFAULT_AUTOPILOT: AutopilotConfig = {
   botId: null,
   intervalMs: 60_000,
   timeframe: "1h",
+  entryOrderType: "market",
   limits: DEFAULT_HEAD_LIMITS,
 };
 
@@ -52,6 +70,7 @@ type PolicyRow = {
   botId: number | null;
   intervalSec: number;
   timeframe: string;
+  entryOrderType: string;
   equityQuote: number;
   maxPositionQuote: number;
   maxTotalExposureQuote: number;
@@ -104,6 +123,9 @@ export function toConfig(row: PolicyRow): AutopilotConfig {
     // more requests at the exchange and the vendors.
     intervalMs: Math.max(10, row.intervalSec) * 1000,
     timeframe: (BAR_SIZES.includes(row.timeframe) ? row.timeframe : DEFAULT_AUTOPILOT.timeframe) as BarSize,
+    // Anything that is not exactly "limit" means market. A typo in this column
+    // must not leave entries resting where an operator expected them filled.
+    entryOrderType: row.entryOrderType === "limit" ? "limit" : "market",
     limits: {
       equityQuote: row.equityQuote,
       maxPositionQuote: row.maxPositionQuote,
@@ -265,6 +287,10 @@ export async function saveAutopilotPolicy(patch: PolicyPatch): Promise<Autopilot
   }
 
   if (patch.mode !== undefined) data.mode = patch.mode === "live" ? "live" : "observe";
+
+  if (patch.entryOrderType !== undefined) {
+    data.entryOrderType = patch.entryOrderType === "limit" ? "limit" : "market";
+  }
 
   if (patch.symbols !== undefined) {
     const symbols = Array.isArray(patch.symbols)

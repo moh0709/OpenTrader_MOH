@@ -504,6 +504,11 @@ model AutopilotPolicy {
   /// Seconds between passes.
   intervalSec Int @default(60)
 
+  /// How an entry reaches the book. "market" crosses the spread and pays the
+  /// taker fee; "limit" rests at the bid for the maker fee and is cancelled if
+  /// the bar ends without a fill. Exits are unaffected — a stop always crosses.
+  entryOrderType String @default("market")
+
   /// Candle timeframe the council reasons over, e.g. "15m", "1h".
   timeframe String @default("1h")
 

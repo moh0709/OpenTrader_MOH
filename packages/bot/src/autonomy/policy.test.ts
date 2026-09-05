@@ -21,6 +21,7 @@ const row = (overrides: Partial<Parameters<typeof toConfig>[0]> = {}) => ({
   botId: 7,
   intervalSec: 60,
   timeframe: "1h",
+  entryOrderType: "market",
   equityQuote: 1000,
   maxPositionQuote: 100,
   maxTotalExposureQuote: 400,
@@ -189,5 +190,30 @@ describe("schema defaults match the shipped limits", () => {
     const minTicket = (defaultOf("minNetProfitQuote") / defaultOf("takeProfitPercent")) * 100;
 
     expect(minTicket).toBeLessThanOrEqual(defaultOf("maxPositionQuote"));
+  });
+});
+
+/**
+ * How an entry reaches the book.
+ *
+ * A limit entry rests at the bid and saves the spread; a market entry crosses
+ * it. The column is free text, so the reader has to be the thing that refuses to
+ * let a typo change execution behaviour.
+ */
+describe("entryOrderType", () => {
+  it("reads a limit entry", () => {
+    expect(toConfig(row({ entryOrderType: "limit" })).entryOrderType).toBe("limit");
+  });
+
+  it("treats anything that is not exactly 'limit' as a market order", () => {
+    // The safe direction: an unrecognised value crosses the spread and fills,
+    // rather than resting somewhere the operator never looks.
+    for (const value of ["market", "Limit", "LIMIT", "maker", "", "null", "true"]) {
+      expect(toConfig(row({ entryOrderType: value })).entryOrderType, value).toBe("market");
+    }
+  });
+
+  it("defaults to crossing the spread", () => {
+    expect(DEFAULT_AUTOPILOT.entryOrderType).toBe("market");
   });
 });
