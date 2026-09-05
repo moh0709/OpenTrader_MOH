@@ -70,6 +70,7 @@ type PolicyRow = {
   cooldownMs: number;
   maxHoldMs: number;
   roundTripFeeBps: number;
+  regimeFilterPeriod: number;
   allowPyramiding: boolean;
   killSwitch: boolean;
 };
@@ -122,6 +123,7 @@ export function toConfig(row: PolicyRow): AutopilotConfig {
       cooldownMs: row.cooldownMs,
       maxHoldMs: row.maxHoldMs,
       roundTripFeeBps: row.roundTripFeeBps,
+      regimeFilterPeriod: row.regimeFilterPeriod,
       allowPyramiding: row.allowPyramiding,
       killSwitch: row.killSwitch,
     },
@@ -218,6 +220,8 @@ export const NUMERIC_BOUNDS: Record<string, { min: number; max: number }> = {
   cooldownMs: { min: 0, max: 2_000_000_000 },
   maxHoldMs: { min: 60_000, max: 2_000_000_000 },
   roundTripFeeBps: { min: 0, max: 500 },
+  /** Zero disables the filter. 500 is longer than any warm-up the head fetches. */
+  regimeFilterPeriod: { min: 0, max: 500 },
 };
 
 const BOOLEAN_KEYS = ["enabled", "allowPyramiding", "killSwitch"] as const;
@@ -250,6 +254,7 @@ export async function saveAutopilotPolicy(patch: PolicyPatch): Promise<Autopilot
       "minHoldMs",
       "cooldownMs",
       "maxHoldMs",
+      "regimeFilterPeriod",
     ].includes(key)
       ? Math.round(clamped)
       : clamped;

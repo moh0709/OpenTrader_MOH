@@ -775,3 +775,98 @@ describe("planPosition — the profit floor", () => {
     expect(minTicketQuote(DEFAULT_HEAD_LIMITS)).toBeLessThanOrEqual(DEFAULT_HEAD_LIMITS.maxPositionQuote);
   });
 });
+
+/**
+ * The regime filter.
+ *
+ * Long-only trend rules are whipsawed by downtrends rather than merely idle in
+ * them; on daily candles from 2018 the losing years were 2018, 2021 and 2022,
+ * the last at a profit factor of 0.27. This gives the head a way to decline.
+ *
+ * It ships disabled. A pre-registered test on that history required the filter
+ * to cut the worst year to better than -20, keep both walk-forward halves
+ * positive, not reduce per-trade expectancy, and stay at or above the 95th
+ * percentile against coin-flip entries. It passed three and missed the first at
+ * -20.x, so the default stays off and the operator turns it on deliberately.
+ */
+describe("planPosition — the regime filter", () => {
+  /** Closes that walk from `from` to `to` so the average sits where we want it. */
+  const ramp = (from: number, to: number, count = 240): Candle[] =>
+    Array.from({ length: count }, (_, i) => {
+      const price = from + ((to - from) * i) / (count - 1);
+      return { open: price, high: price, low: price, close: price, volume: 1, timestamp: NOW - (count - i) * 60_000 };
+    });
+
+  const gated: HeadLimits = { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 0, maxPositionQuote: 250, regimeFilterPeriod: 200 };
+
+  it("refuses an entry below the average, and names both numbers", () => {
+    // Falling from 200 to 100: the last price is far under the 200-bar mean.
+    const falling = ramp(200, 100);
+    const plan = planPosition(
+      { symbol: "BTC/USDT", price: falling[falling.length - 1].close, candles: falling },
+      verdict({ confidence: 0.9 }),
+      null,
+      gated,
+      portfolio(),
+      NOW,
+    );
+
+    expect(plan.action).toBe("hold");
+    expect(plan.reason).toMatch(/below its 200-period average/);
+    expect(plan.reason).toMatch(/standing aside/);
+  });
+
+  it("allows an entry above the average", () => {
+    const rising = ramp(100, 200);
+    const plan = planPosition(
+      { symbol: "BTC/USDT", price: rising[rising.length - 1].close, candles: rising },
+      verdict({ confidence: 0.9 }),
+      null,
+      gated,
+      portfolio(),
+      NOW,
+    );
+
+    expect(plan.action).toBe("open");
+  });
+
+  it("has no opinion when the history is shorter than the period", () => {
+    // A cold start must not read as a bear market. 40 candles, 200-bar filter.
+    const plan = planPosition(snapshot(), verdict({ confidence: 0.9 }), null, gated, portfolio(), NOW);
+
+    expect(plan.action).toBe("open");
+  });
+
+  it("is off unless the operator turns it on", () => {
+    expect(DEFAULT_HEAD_LIMITS.regimeFilterPeriod).toBe(0);
+
+    const falling = ramp(200, 100);
+    const plan = planPosition(
+      { symbol: "BTC/USDT", price: falling[falling.length - 1].close, candles: falling },
+      verdict({ confidence: 0.9 }),
+      null,
+      { ...DEFAULT_HEAD_LIMITS, roundTripFeeBps: 0, maxPositionQuote: 250 },
+      portfolio(),
+      NOW,
+    );
+
+    expect(plan.action).toBe("open");
+  });
+
+  it("never blocks an exit on a position already held", () => {
+    // The filter gates entries only. A stop below the average must still fire,
+    // or the filter becomes a second stop with none of the first one's promises.
+    const falling = ramp(200, 100);
+    const held = position({ quantity: 2.5, entryPrice: 200, entryFeeQuote: 0 });
+    const plan = planPosition(
+      { symbol: "BTC/USDT", price: falling[falling.length - 1].close, candles: falling },
+      verdict(),
+      held,
+      gated,
+      portfolio({ openPositions: 1 }),
+      NOW,
+    );
+
+    expect(plan.action).toBe("stop_out");
+  });
+});

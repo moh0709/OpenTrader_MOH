@@ -31,6 +31,7 @@ const row = (overrides: Partial<Parameters<typeof toConfig>[0]> = {}) => ({
   minConfidence: 0.6,
   minExitConfidence: 0.5,
   minNetProfitQuote: 3,
+  regimeFilterPeriod: 0,
   takeProfitPercent: 1.5,
   stopLossPercent: 2.5,
   trailStartPercent: 1,
@@ -146,7 +147,7 @@ describe("schema defaults match the shipped limits", () => {
   const defaultOf = (column: string): number => {
     for (const line of block.split("\n")) {
       const parts = line.trim().split(/\s+/);
-      if (parts[0] !== column || parts[1] !== "Float") continue;
+      if (parts[0] !== column || (parts[1] !== "Float" && parts[1] !== "Int")) continue;
 
       const marker = parts.find((part) => part.startsWith("@default("));
       if (!marker) break;
@@ -166,6 +167,7 @@ describe("schema defaults match the shipped limits", () => {
     "trailStartPercent",
     "trailGivebackPercent",
     "roundTripFeeBps",
+    "regimeFilterPeriod",
     "equityQuote",
     "maxPositionQuote",
     "maxTotalExposureQuote",

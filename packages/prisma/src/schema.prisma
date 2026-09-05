@@ -547,6 +547,11 @@ model AutopilotPolicy {
 
   roundTripFeeBps Float @default(55)
 
+  /// Refuse new entries while price is under its own N-period simple moving
+  /// average. Entries only — every exit rule still manages an open position.
+  /// Zero disables it; 200 on a daily bar is the standard regime filter.
+  regimeFilterPeriod Int @default(0)
+
   allowPyramiding Boolean @default(false)
   /// Operator pause: blocks new entries, keeps managing what is open.
   killSwitch      Boolean @default(false)

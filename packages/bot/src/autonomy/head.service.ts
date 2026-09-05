@@ -65,6 +65,20 @@ import { loadOpenPositions, peakSince, summariseBook } from "./positions.js";
 /** Candles fetched per symbol. Enough to warm every indicator with room over. */
 const CANDLE_LIMIT = 120;
 
+/**
+ * How many candles this policy needs.
+ *
+ * The regime filter reads a moving average as long as the operator asks for,
+ * and 200 of them do not fit in the 120 this used to fetch. `sma` returns null
+ * when it is handed too little history, and a null reads as "no opinion" — so a
+ * filter set to 200 would have been silently inert, which is the worst of the
+ * three possible behaviours. Fetch what the longest rule actually needs, with a
+ * little over for the averages to settle.
+ */
+function candlesNeeded(config: AutopilotConfig): number {
+  return Math.max(CANDLE_LIMIT, config.limits.regimeFilterPeriod + 20);
+}
+
 /** Until the policy has been read, poll at the conservative default. */
 const DEFAULT_INTERVAL_MS = 60_000;
 
@@ -357,7 +371,7 @@ export class TradingHead {
     const { symbol, config, exchange, intel, conviction, book } = input;
 
     const now = Date.now();
-    const raw = await exchange.getCandlesticks({ symbol, bar: config.timeframe, limit: CANDLE_LIMIT });
+    const raw = await exchange.getCandlesticks({ symbol, bar: config.timeframe, limit: candlesNeeded(config) });
     const candles = toCandles(raw);
 
     if (candles.length === 0) {

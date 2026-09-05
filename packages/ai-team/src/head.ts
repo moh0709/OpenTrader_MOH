@@ -1,3 +1,4 @@
+import { closes, sma } from "./indicators.js";
 import type { CouncilVerdict, MarketSnapshot } from "./types.js";
 
 /**
@@ -173,6 +174,28 @@ export type HeadLimits = {
   /** Round-trip cost estimate in basis points, charged against every exit. */
   roundTripFeeBps: number;
 
+  /**
+   * Refuse new entries while the price is under its own long moving average.
+   *
+   * The head is long-only, and a long-only trend rule does not merely fail in a
+   * downtrend — it is whipsawed by one. Measured on daily candles from 2018:
+   * 2018 lost 33, 2021 lost 29, 2022 lost 78 at a profit factor of 0.27, while
+   * the profitable years carried the total. The signal has no way of declining
+   * to participate, so this gives it one.
+   *
+   * The rule is deliberately the most standard one there is — price against its
+   * 200-period simple moving average — because a threshold chosen to fit this
+   * particular history would measure nothing but the fitting. It was specified
+   * before it was run.
+   *
+   * Entries only. An open position is still managed by every exit rule, because
+   * a filter that also liquidated would be a second, hidden stop with none of
+   * the first one's guarantees. Zero disables it. A period longer than the
+   * candles on hand yields no opinion rather than a refusal, so a cold start
+   * does not read as a bear market.
+   */
+  regimeFilterPeriod: number;
+
   /** Add to a position already on. Off by default. */
   allowPyramiding: boolean;
   /**
@@ -227,6 +250,15 @@ export const DEFAULT_HEAD_LIMITS: HeadLimits = {
   maxHoldMs: 5 * 24 * 60 * 60 * 1000,
 
   roundTripFeeBps: 55,
+
+  /*
+   * Off by default, on deliberately.
+   *
+   * A 200-period filter on the shipped 1h timeframe is an eight-day average,
+   * which is not a regime, it is a lagging price. It earns its keep on a daily
+   * bar and is enabled there by policy rather than assumed here.
+   */
+  regimeFilterPeriod: 0,
 
   allowPyramiding: false,
   killSwitch: false,
@@ -569,6 +601,23 @@ export function planPosition(
    * says is falling gets refused outright, however the vote went. Corroboration
    * is optional; contradiction is disqualifying.
    */
+  /*
+   * The regime filter.
+   *
+   * Placed with the other entry vetoes and before any sizing, so a refusal here
+   * costs nothing and is recorded with its reason like every other one.
+   */
+  if (limits.regimeFilterPeriod > 0) {
+    const trend = sma(closes(snapshot.candles), limits.regimeFilterPeriod);
+
+    if (trend !== null && price < trend) {
+      return stand(
+        `Not buying ${symbol} below its ${limits.regimeFilterPeriod}-period average ` +
+          `(${price.toFixed(2)} against ${trend.toFixed(2)}); standing aside until the trend turns.`,
+      );
+    }
+  }
+
   const tv = snapshot.technical;
   if (tv && tv.rating <= -0.1 && tv.alignment >= 0.6 && tv.timeframes >= 3) {
     return stand(
