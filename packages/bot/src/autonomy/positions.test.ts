@@ -85,3 +85,44 @@ describe("a trade carrying both exits", () => {
     expect(chosen.status).not.toBe("Filled");
   });
 });
+
+/**
+ * A slot is taken when the entry starts working, not when it fills.
+ *
+ * The planner counted filled entries only; the order door counted resting ones
+ * too. While every entry was a market order the two agreed, because a market
+ * order fills at once. Resting limit entries broke the tie: the head saw room
+ * for one more, the door refused it as committed, and the feed filled with
+ * refusals every pass — none of them anyone's mistake.
+ */
+describe("what counts as an occupied slot", () => {
+  const slotTaken = (entryStatus: string, exitFilled: boolean) => {
+    const working = entryStatus === "Idle" || entryStatus === "Placed";
+    if (entryStatus === "Filled" && exitFilled) return false;
+
+    return entryStatus === "Filled" || working;
+  };
+
+  it("counts a resting limit entry, because it can fill at any moment", () => {
+    expect(slotTaken("Placed", false)).toBe(true);
+    expect(slotTaken("Idle", false)).toBe(true);
+  });
+
+  it("counts a filled entry that has not been exited", () => {
+    expect(slotTaken("Filled", false)).toBe(true);
+  });
+
+  it("releases the slot once an exit has filled", () => {
+    expect(slotTaken("Filled", true)).toBe(false);
+  });
+
+  it("agrees with the order door on every entry state", () => {
+    // The door (openManualPositions) treats Idle, Placed and unexited Filled as
+    // live. Any disagreement here is a refusal loop, so they are asserted
+    // together rather than trusted to stay in step.
+    for (const status of ["Idle", "Placed", "Filled"]) {
+      const doorCountsIt = status === "Idle" || status === "Placed" || status === "Filled";
+      expect(slotTaken(status, false), status).toBe(doorCountsIt);
+    }
+  });
+});

@@ -229,7 +229,24 @@ export async function summariseBook(botId: number, now = Date.now()): Promise<Bo
       continue;
     }
 
-    if (entry.status === XOrderStatus.Filled) {
+    /*
+     * A slot is taken the moment an entry is working, not when it fills.
+     *
+     * This counted filled entries only, which was the same answer while every
+     * entry was a market order that filled instantly. Resting limit entries made
+     * the two disagree: the planner saw five positions and room for a sixth, the
+     * order door counted the resting entry as committed and refused — so the head
+     * planned an entry it could never place, every pass, and the feed filled with
+     * refusals that were nobody`s mistake.
+     *
+     * The door has it right. An order resting at the bid can fill at any moment,
+     * and capital that may be spent without being asked again is committed. It
+     * counts toward the position cap and toward exposure at the price it would
+     * fill at.
+     */
+    const working = entry.status === XOrderStatus.Idle || entry.status === XOrderStatus.Placed;
+
+    if (entry.status === XOrderStatus.Filled || working) {
       openPositions += 1;
       openExposureQuote += entryPrice * entry.quantity;
     }

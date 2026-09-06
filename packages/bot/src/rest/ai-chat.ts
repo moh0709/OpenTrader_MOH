@@ -75,6 +75,11 @@ export const SYSTEM_PROMPT = [
   "",
   "Be brief. Two or three sentences unless asked for more. Use the bot names and symbols as given.",
   "",
+  "A bot is listed with the market it is configured for, which is not necessarily where its positions are.",
+  "The trading head routes its own orders through one bot and trades its whole watchlist that way, so that",
+  "bot can hold positions in markets its configured symbol never mentions. Never say a bot`s positions are",
+  "on a particular pair unless the position list says so — say how many it holds and leave the pair out.",
+  "",
   "When the owner asks you to change something, or when you want to recommend a change, end your reply with a",
   "fenced json block exactly like this and nothing after it:",
   "",
@@ -212,7 +217,7 @@ export function buildContextBlock(context: ChatContext): string {
     "Bots:",
     ...context.bots.map((bot) =>
       [
-        `  #${bot.botId} ${bot.name} (${bot.symbol})`,
+        `  #${bot.botId} ${bot.name} (configured for ${bot.symbol})`,
         bot.enabled ? "running" : "stopped",
         `realised ${money(bot.netPnl)}`,
         `floating ${money(bot.floatingPnl)}`,

@@ -131,7 +131,7 @@ describe("buildContextBlock", () => {
     const block = buildContextBlock(context());
 
     expect(block).toContain("realised 128.40");
-    expect(block).toContain("#3 Grid-ETH (ETH/USDT)");
+    expect(block).toContain("#3 Grid-ETH (configured for ETH/USDT)");
     expect(block).toContain("running");
     expect(block).toContain("ETH/USDT: sell at 72% confidence");
     expect(block).toContain("#9 Grid-ETH, after 4 losses in a row");
@@ -197,5 +197,29 @@ describe("SYSTEM_PROMPT", () => {
 
   it("tells the model it cannot carry anything out itself", () => {
     expect(SYSTEM_PROMPT).toContain("cannot carry any of this out");
+  });
+});
+
+/**
+ * A bot's configured symbol is not where its positions are.
+ *
+ * The trading head routes every order it makes through one bot and trades its
+ * whole watchlist that way, so bot 21 — configured for BTC/USDT — held BTC, LTC,
+ * BNB, ETH and LINK at once. Printed as "(BTC/USDT)", the assistant read that as
+ * a fact about the positions and told the owner it had "5 open positions on
+ * BTC/USDT", which was wrong about four of them.
+ */
+describe("a bot's configured market is labelled as such", () => {
+  it("does not present the configured symbol as the position's market", () => {
+    const block = buildContextBlock(context());
+
+    expect(block).toContain("configured for");
+    // The bare "(SYMBOL)" form is what invited the wrong reading.
+    expect(block).not.toMatch(/#\d+ [^\n(]+ \([A-Z]+\/[A-Z]+\)/);
+  });
+
+  it("warns the model that positions may sit outside that market", () => {
+    expect(SYSTEM_PROMPT).toContain("not necessarily where its positions are");
+    expect(SYSTEM_PROMPT).toMatch(/routes its own orders through one bot/);
   });
 });
