@@ -57,3 +57,47 @@ describe("evaluateTrailing", () => {
     expect(result.action).toBe("hold");
   });
 });
+
+/**
+ * Whose position is it?
+ *
+ * Adaptive trailing is a strategy feature — it reads the bot's own minimum
+ * profit and trails against the ATR of the market the bot was pointed at. A deal
+ * in the manual or autopilot lane was opened by somebody else, and that somebody
+ * is already managing the exit.
+ *
+ * Running both is worse than running neither, and it showed: two trading-head
+ * positions were trailed out at 2.36 and 2.35, under the head's own 3-unit
+ * floor, by a policy that had never heard of it. No journal entry, no decision,
+ * no reason an operator could read — the head went on believing it held them.
+ */
+describe("adaptive trailing stays out of the external lanes", () => {
+  // Mirrors isExternalRef, so the two cannot drift apart unnoticed.
+  const external = (ref: string | null) =>
+    typeof ref === "string" && (ref.startsWith("manual:") || ref.startsWith("auto:"));
+
+  it("declines a trade the trading head opened", () => {
+    expect(external("auto:1788647251419")).toBe(true);
+  });
+
+  it("declines a trade an operator forced open", () => {
+    expect(external("manual:1788600000000")).toBe(true);
+  });
+
+  it("still manages the strategy's own deals", () => {
+    for (const ref of ["grid-1-3", "dca:7", "", null]) {
+      expect(external(ref), String(ref)).toBe(false);
+    }
+  });
+
+  it("would have refused the two exits that bypassed the floor", () => {
+    // Both were autopilot deals closed under a 3-unit floor by this policy.
+    for (const [ref, banked] of [
+      ["auto:1788647251419", 2.36],
+      ["auto:1788647252594", 2.35],
+    ] as const) {
+      expect(external(ref)).toBe(true);
+      expect(banked).toBeLessThan(3);
+    }
+  });
+});

@@ -1,3 +1,4 @@
+import { isExternalRef } from "../../../trade-opener.js";
 import { xprisma } from "@opentrader/db";
 import type { SmartTradeWithOrders, ExchangeAccountWithCredentials } from "@opentrader/db";
 import type { IExchange } from "@opentrader/exchanges";
@@ -253,6 +254,27 @@ export class TradeExecutor implements ISmartTradeExecutor {
    */
   private async applyAdaptiveTrailing(market?: SmartTradeContext): Promise<boolean> {
     if (!market?.ticker || !this.smartTrade.botId || !market.atr) return false;
+
+    /*
+     * Not on a deal this bot did not open.
+     *
+     * Adaptive trailing is a strategy feature: it reads the bot`s own minimum
+     * profit and trails against the ATR of the market the bot was pointed at. A
+     * deal in the manual or autopilot lane was opened by somebody else — an
+     * operator`s click, or the trading head on its own judgement — and that
+     * somebody is already managing the exit.
+     *
+     * Running both is worse than running neither, and it showed: two head
+     * positions were trailed out at 2.36 and 2.35, under the head`s own three
+     * unit floor, by a policy that had never heard of it. No journal entry, no
+     * decision, no reason an operator could read — the head believed it was
+     * still holding them.
+     *
+     * `positions.ts` states the same rule in the other direction: the head must
+     * not close what a strategy opened. This is that rule, enforced from this
+     * side.
+     */
+    if (isExternalRef(this.smartTrade.ref)) return false;
 
     const entry = this.smartTrade.orders.find((order) => order.entityType === XEntityType.EntryOrder);
     const takeProfit = this.smartTrade.orders.find((order) => order.entityType === XEntityType.TakeProfitOrder);
