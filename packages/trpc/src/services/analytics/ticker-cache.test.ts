@@ -133,6 +133,48 @@ describe("TickerCache", () => {
     expect(cache.bySymbol().get("BAD/USD")!.error).toBe("no such market");
   });
 
+  it("reports no fetch age before anything has been priced", () => {
+    const clock = makeClock();
+    const cache = new TickerCache(vi.fn(), 10_000, 120_000, clock.now);
+
+    expect(cache.oldestFetchAge()).toBeNull();
+  });
+
+  it("reports the stalest fetch age, so one lagging symbol is not hidden by a fresh one", async () => {
+    const clock = makeClock();
+    const fetcher = vi.fn().mockResolvedValue({ last: 1, bid: 1, ask: 1, timestamp: clock.now() });
+    const cache = new TickerCache(fetcher, 10_000, 120_000, clock.now);
+
+    await cache.refresh([{ exchangeCode: "COINBASE", symbol: "BTC/USD" }]);
+    clock.advance(90_000);
+    await cache.refresh([{ exchangeCode: "COINBASE", symbol: "ETH/USD" }]);
+
+    expect(cache.oldestFetchAge()).toBe(90_000);
+  });
+
+  it("waits for the fetch when asked to, so the caller reads a price it just took", async () => {
+    const clock = makeClock();
+    const fetcher = vi.fn().mockResolvedValue({ last: 42, bid: 42, ask: 42, timestamp: clock.now() });
+    const cache = new TickerCache(fetcher, 10_000, 120_000, clock.now);
+
+    await cache.refreshWithin(REQUEST, 5_000);
+
+    expect(cache.list()[0]!.last).toBe(42);
+    expect(cache.oldestFetchAge()).toBe(0);
+  });
+
+  it("gives up waiting on a hung exchange rather than hanging the caller", async () => {
+    // An exchange call with no answer must leave the reading visibly stale, not
+    // block the dashboard and the health probe behind it.
+    const clock = makeClock();
+    const fetcher = vi.fn().mockReturnValue(new Promise(() => {}));
+    const cache = new TickerCache(fetcher, 10_000, 120_000, clock.now);
+
+    await expect(cache.refreshWithin(REQUEST, 20)).resolves.toBeUndefined();
+
+    expect(cache.list()).toHaveLength(0);
+  });
+
   it("ages a reading from its exchange timestamp, not from when it was cached", async () => {
     const clock = makeClock();
     const fetcher = vi.fn().mockResolvedValue({ last: 1, bid: 1, ask: 1, timestamp: clock.now() - 30_000 });

@@ -95,6 +95,15 @@ export type BotLogRow = {
 const CONTEXT_TTL_MS = 2_000;
 const DB_STATS_TTL_MS = 600_000;
 /**
+ * Readings older than this are re-priced before the caller is served, rather
+ * than in the background behind it. It sits at the freshness check's warning
+ * bar, so an age that check would complain about can only come from an exchange
+ * that did not answer, never from a gap between callers.
+ */
+const TICKER_BLOCKING_AGE_MS = 60_000;
+/** How long such a caller waits for prices before being served the stale ones. */
+const TICKER_WAIT_BUDGET_MS = 5_000;
+/**
  * Bot log reads are cached hard.
  *
  * `BotLog` stores a full market-data context per row and carries no index on
@@ -281,14 +290,29 @@ export class DashboardService {
       if (account) wanted.set(`${account.code}:${trade.symbol}`, { exchangeCode: account.code, symbol: trade.symbol });
     }
 
-    // Pricing a symbol is a call to the exchange, around 200ms each, and there is
-    // no reason for a dashboard poll to wait on it: a price up to one TTL old is
-    // perfectly good for marking positions. Only the very first load blocks, so
-    // that the first paint has prices rather than empty floating P&L; after that
-    // the refresh runs in the background and the next poll picks it up.
+    /*
+     * Pricing a symbol is a call to the exchange, around 200ms each, and a
+     * dashboard polling every few seconds should not wait on it: a price up to
+     * one TTL old is perfectly good for marking positions, and the next poll
+     * picks up what this one started.
+     *
+     * That only holds while the polls keep coming. A caller arriving after a
+     * long gap - the health probe, which is the only caller once no browser is
+     * open - would otherwise be handed the previous caller's prices and left to
+     * report their age, making market-data freshness a measure of how often
+     * something asks rather than of the exchange. So once the readings are old
+     * enough for that check to care, wait for the fetch instead. The wait is
+     * bounded: an exchange that hangs leaves the prices visibly stale rather
+     * than hanging the dashboard with it.
+     */
     const requests = [...wanted.values()];
-    if (this.tickers.list().length === 0) await this.tickers.refresh(requests);
-    else void this.tickers.refresh(requests);
+    const oldestReading = this.tickers.oldestFetchAge();
+
+    if (oldestReading === null || oldestReading >= TICKER_BLOCKING_AGE_MS) {
+      await this.tickers.refreshWithin(requests, TICKER_WAIT_BUDGET_MS);
+    } else {
+      void this.tickers.refresh(requests);
+    }
 
     // Measuring table sizes is slow, so it is refreshed out of band.
     void this.refreshDatabaseStats();

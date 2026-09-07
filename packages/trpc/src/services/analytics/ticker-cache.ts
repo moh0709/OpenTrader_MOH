@@ -126,6 +126,48 @@ export class TickerCache {
     }
   }
 
+  /**
+   * How old the stalest reading is, or null when nothing has been priced yet.
+   *
+   * A caller uses this to decide whether it can be served from cache or should
+   * wait for a fetch. The freshness check reads the same ages, so a caller that
+   * never waits makes that check measure the interval between callers rather
+   * than the state of the exchange.
+   */
+  oldestFetchAge(): number | null {
+    if (this.entries.size === 0) return null;
+
+    const now = this.now();
+
+    return Math.max(...[...this.entries.values()].map((entry) => now - entry.fetchedAt));
+  }
+
+  /**
+   * Refresh, waiting at most `budgetMs` for the fetches to settle.
+   *
+   * Waiting is what makes a reading trustworthy, but an exchange call that
+   * hangs must not hang the caller with it. When the budget runs out the
+   * fetches carry on in the background and the caller is served whatever it
+   * already holds, which the freshness check then correctly reports as stale.
+   */
+  async refreshWithin(requests: TickerRequest[], budgetMs: number): Promise<void> {
+    // Failures are recorded on the entry, never thrown, but the settled promise
+    // outlives the budget and must not surface as an unhandled rejection.
+    const settled = this.refresh(requests).catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      await Promise.race([
+        settled,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, budgetMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   /** Snapshot of every cached symbol, with ages computed at call time. */
   list(): AnalyticsTicker[] {
     const now = this.now();
