@@ -177,6 +177,8 @@ export class DashboardService {
   private botLogs: { at: number; rows: BotLogRow[] } | null = null;
   private botActivity: { at: number; value: Record<number, number> } | null = null;
   private paperFillPatch: boolean | null | undefined;
+  /** Time the last context load spent deliberately waiting on the exchange. */
+  private tickerWaitMs = 0;
 
   readonly tickers = new TickerCache(async (exchangeCode, symbol) => {
     const exchange = exchangeProvider.fromCode(exchangeCode as ExchangeCode, false);
@@ -309,7 +311,9 @@ export class DashboardService {
     const oldestReading = this.tickers.oldestFetchAge();
 
     if (oldestReading === null || oldestReading >= TICKER_BLOCKING_AGE_MS) {
+      const waitedFrom = Date.now();
       await this.tickers.refreshWithin(requests, TICKER_WAIT_BUDGET_MS);
+      this.tickerWaitMs += Date.now() - waitedFrom;
     } else {
       void this.tickers.refresh(requests);
     }
@@ -326,6 +330,22 @@ export class DashboardService {
       exchangeCodes,
       loadMs: Date.now() - startedAt,
     };
+  }
+
+  /**
+   * How long the context load blocked on the exchange, cleared as it is read.
+   *
+   * The API latency check times how long the health report took to build, as a
+   * proxy for responsiveness. Since that build may deliberately wait on a
+   * ticker refresh - up to TICKER_WAIT_BUDGET_MS, well past the check's own
+   * crit threshold - charging the wait to latency made the probe alert on its
+   * own diagnostics. The waiting is intended; reporting it as slowness is not.
+   */
+  takeTickerWaitMs(): number {
+    const waited = this.tickerWaitMs;
+    this.tickerWaitMs = 0;
+
+    return waited;
   }
 
   /** Invalidate the cached reads, so a control action is reflected immediately. */

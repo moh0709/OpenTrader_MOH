@@ -148,6 +148,23 @@ describe("runHealthChecks", () => {
     expect(find(runHealthChecks(makeInput({ lastBotActivity: { 5: NOW - 300_000 } })), "bots.stalled").status).toBe("ok");
   });
 
+  it("flags an enabled bot that has never executed at all", () => {
+    // The blind spot that hid three dead bots: with no activity row to measure,
+    // the check skipped them entirely and reported only the healthy ones.
+    const never = runHealthChecks(makeInput({ lastBotActivity: {} }));
+
+    expect(find(never, "bots.stalled").status).toBe("warn");
+    expect(find(never, "bots.stalled").detail).toContain("Bronze Dud Bolt");
+  });
+
+  it("gives a newly created bot its first window before calling it stalled", () => {
+    const fresh = runHealthChecks(
+      makeInput({ bots: [makeBot({ createdAt: new Date(NOW - 60_000) })], lastBotActivity: {} }),
+    );
+
+    expect(find(fresh, "bots.stalled").status).toBe("ok");
+  });
+
   it("flags a stuck processing flag", () => {
     const report = runHealthChecks(makeInput({ bots: [makeBot({ processing: true })] }));
 

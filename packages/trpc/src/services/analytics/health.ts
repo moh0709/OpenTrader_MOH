@@ -365,12 +365,16 @@ export function runHealthChecks(input: HealthInput): HealthReport {
   for (const bot of enabledBots) {
     if (bot.processing) stuckProcessing.push(bot.name);
 
-    const lastActivity = input.lastBotActivity[bot.id];
-    if (lastActivity === undefined) continue;
-
     const timeframeMs = timeframeToMs(bot.timeframe);
     const window = Math.max(t.botStallFloorMs, (timeframeMs ?? 0) * t.botStallFactor);
-    if (input.now - lastActivity > window) stalled.push(bot.name);
+
+    // A bot that has never executed is the most stalled a bot can be, but it has
+    // no activity record to measure - and skipping it for that reason hid the
+    // only genuinely dead bots on this install while faithfully reporting the
+    // healthy ones. Fall back to when the bot was created, so a bot that has
+    // never run still gets one full window before it counts.
+    const since = input.lastBotActivity[bot.id] ?? bot.createdAt.getTime();
+    if (input.now - since > window) stalled.push(bot.name);
   }
 
   checks.push({

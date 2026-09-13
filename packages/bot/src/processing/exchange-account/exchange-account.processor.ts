@@ -172,7 +172,7 @@ export class ExchangeAccountProcessor {
       symbol,
     });
 
-    logger.info(
+    logger.debug(
       `[${this.exchangeAccount.name}] Open orders: ${openOrders.length}: Closed orders: ${closedOrders.length}`,
     );
     const orders = [...closedOrders, ...openOrders];

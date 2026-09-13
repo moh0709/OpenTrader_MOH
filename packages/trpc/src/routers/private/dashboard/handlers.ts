@@ -100,6 +100,6 @@ export async function getHealth({ ctx }: { ctx: { user: User } }) {
     host: dashboardService.hostStats(),
     lastBotActivity,
     paperFillPatchApplied: dashboardService.hasPaperFillFix(),
-    apiLatencyMs: Date.now() - startedAt,
+    apiLatencyMs: Date.now() - startedAt - dashboardService.takeTickerWaitMs(),
   });
 }

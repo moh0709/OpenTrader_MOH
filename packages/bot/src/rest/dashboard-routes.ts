@@ -526,7 +526,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       host: dashboardService.hostStats(),
       lastBotActivity,
       paperFillPatchApplied: dashboardService.hasPaperFillFix(),
-      apiLatencyMs: Date.now() - startedAt,
+      apiLatencyMs: Date.now() - startedAt - dashboardService.takeTickerWaitMs(),
     });
 
     /*

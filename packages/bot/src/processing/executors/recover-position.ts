@@ -37,7 +37,12 @@ type OrderRow = {
 
 const ENTRY_TYPES = ["EntryOrder", "SafetyOrder"];
 const EXIT_TYPES = ["TakeProfitOrder", "StopLossOrder"];
-const LIVE_STATUSES = ["Idle", "Placed"];
+// Only an exit the exchange is actually holding keeps a position off this
+// list. "Idle" means the order exists in our database and has never been
+// sent, which is exactly the state a stranded position is in - counting it
+// as live is what let positions sit unexitable while this check reported
+// none, and disagreed with the orders.stuck health check about the same rows.
+const LIVE_STATUSES = ["Placed"];
 
 export type RecoverablePosition = {
   smartTradeId: number;
