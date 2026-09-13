@@ -201,8 +201,24 @@ export async function recoverPosition(smartTradeId: number, ownerId: number): Pr
       return fail("Exchange rejected the order");
     }
 
+    // Retire whatever this replaced. When the source was an already-cancelled
+    // exit there is nothing to do, but a position stranded on an Idle exit
+    // leaves that row behind, and an Idle exit under a filled entry is exactly
+    // what orders.stuck counts - so recovering the position would otherwise
+    // leave the alert asserting forever that it still needs recovering.
+    const superseded = await xprisma.order.updateMany({
+      where: {
+        smartTradeId: trade.id,
+        entityType: { in: EXIT_TYPES },
+        status: "Idle",
+        id: { not: created.id },
+      },
+      data: { status: "Revoked" },
+    });
+
     logger.info(
-      `[Recovery] Replaced the exit for stranded position ${trade.id}: Sell ${quantity} ${trade.symbol} at ${cancelledExit.price}`,
+      `[Recovery] Replaced the exit for stranded position ${trade.id}: Sell ${quantity} ${trade.symbol} at ${cancelledExit.price}` +
+        (superseded.count > 0 ? ` (retired ${superseded.count} superseded idle exit)` : ""),
     );
 
     return {
