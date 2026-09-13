@@ -53,6 +53,10 @@ export type AnalyticsBot = {
   timeframe: string | null;
   createdAt: Date;
   exchangeAccountId: number;
+  /** Most quote currency this bot may hold committed at once. Null means uncapped. */
+  maxCapital: number | null;
+  /** Least a cycle must earn before its exit may close it. Null means no floor. */
+  minProfit: number | null;
   settings: Record<string, unknown>;
   state: Record<string, unknown>;
 };

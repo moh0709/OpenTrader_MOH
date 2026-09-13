@@ -77,6 +77,8 @@ type BotRow = {
   timeframe: string | null;
   createdAt: Date;
   exchangeAccountId: number;
+  maxCapital: number | null;
+  minProfit: number | null;
   settings: string;
   state: string;
 };
@@ -245,6 +247,8 @@ export class DashboardService {
       timeframe: bot.timeframe,
       createdAt: bot.createdAt,
       exchangeAccountId: bot.exchangeAccountId,
+      maxCapital: bot.maxCapital,
+      minProfit: bot.minProfit,
       settings: safeParse(bot.settings),
       state: safeParse(bot.state),
     }));

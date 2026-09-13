@@ -131,6 +131,8 @@ export type HealthInput = {
     filledEntriesWithoutExit: number;
   };
   /** Whether the paper exchange limit-order fill fix is present in this build. */
+  /** Capped bots and what each currently has committed, for the capital check. */
+  botCapital: Array<{ botId: number; name: string; maxCapital: number; committed: number }>;
   paperFillPatchApplied: boolean | null;
   thresholds?: Partial<HealthThresholds>;
 };
@@ -402,6 +404,36 @@ export function runHealthChecks(input: HealthInput): HealthReport {
         : "Every enabled bot has executed recently.",
     metric: stalled.length,
   });
+
+  /*
+   * Capital headroom.
+   *
+   * A bot at its cap is not broken - the cap is doing exactly what it was set
+   * to do - but it will refuse every entry from here on, and it does so
+   * silently: the executor returns without placing and the refusal log is
+   * throttled to one line per distinct reason. A fleet can sit dead for days
+   * looking perfectly healthy. This is the check that says so out loud.
+   */
+  const capped = input.botCapital.filter((bot) => bot.committed >= bot.maxCapital);
+
+  if (input.botCapital.length > 0) {
+    checks.push({
+      id: "bots.capital",
+      group: "Bots",
+      label: "Capital headroom",
+      status: capped.length > 0 ? "warn" : "ok",
+      value: capped.length > 0 ? `${capped.length} at cap` : `${input.botCapital.length} within cap`,
+      detail:
+        capped.length > 0
+          ? `At their capital cap and refusing new entries until a position closes: ${capped
+              .map((bot) => `${bot.name} (${bot.committed.toFixed(0)}/${bot.maxCapital.toFixed(0)})`)
+              .join(", ")}. This is the cap working as configured, not a fault, but these bots will not open anything while it holds.`
+          : `Every capped bot has room to trade: ${input.botCapital
+              .map((bot) => `${bot.name} (${bot.committed.toFixed(0)}/${bot.maxCapital.toFixed(0)})`)
+              .join(", ")}.`,
+      metric: capped.length,
+    });
+  }
 
   if (stuckProcessing.length > 0) {
     checks.push({

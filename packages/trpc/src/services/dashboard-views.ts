@@ -310,6 +310,43 @@ export function buildHealthView(input: HealthViewInput): HealthReport & { databa
     }
   }
 
+  /*
+   * What each capped bot currently has at stake.
+   *
+   * The capital cap is enforced deep in the trade executor, which refuses an
+   * entry and returns quietly; the refusal log is throttled, because a grid
+   * refuses the same level on every tick. That is the right thing for the log
+   * and the wrong thing for an operator, who is left with bots that have simply
+   * stopped trading and nothing anywhere saying why. The rule mirrors
+   * `committedCapital` in @opentrader/bot, restated here because this package
+   * must not depend on that one.
+   */
+  const botCapital = derived.context.bots
+    .filter((bot) => bot.enabled && bot.maxCapital !== null && bot.maxCapital > 0)
+    .map((bot) => {
+      let committed = 0;
+
+      for (const trade of derived.context.trades) {
+        if (trade.botId !== bot.id) continue;
+
+        // Money is only still at stake while the cycle is open.
+        const closed = trade.orders.some((order) => !isEntryOrder(order) && order.status === "Filled");
+
+        for (const order of trade.orders) {
+          if (!isEntryOrder(order)) continue;
+
+          if (order.status === "Filled") {
+            if (!closed) committed += (order.filledPrice ?? order.price ?? 0) * order.quantity;
+          } else if (order.status === "Idle" || order.status === "Placed") {
+            // An entry resting on the book is a commitment, not spare capacity.
+            committed += (order.price ?? 0) * order.quantity;
+          }
+        }
+      }
+
+      return { botId: bot.id, name: bot.name, maxCapital: bot.maxCapital!, committed };
+    });
+
   const report = runHealthChecks({
     now: derived.context.now,
     process: input.process,
@@ -331,6 +368,7 @@ export function buildHealthView(input: HealthViewInput): HealthReport & { databa
       // Positions holding stock with no live sell order - the abandoned book.
       filledEntriesWithoutExit: derived.openPositions.filter((p) => p.exitState !== "live").length,
     },
+    botCapital,
     paperFillPatchApplied: input.paperFillPatchApplied,
     thresholds: input.thresholds,
   });

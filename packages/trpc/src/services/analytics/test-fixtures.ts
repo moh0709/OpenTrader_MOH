@@ -194,6 +194,8 @@ export function makeBot(overrides: Partial<AnalyticsBot> = {}): AnalyticsBot {
     timeframe: "1m",
     createdAt: new Date(1_786_100_000_000),
     exchangeAccountId: 1,
+    maxCapital: null,
+    minProfit: null,
     settings: {},
     state: {},
     ...overrides,

@@ -31,6 +31,7 @@ function makeInput(overrides: Partial<HealthInput> = {}): HealthInput {
     bots: [makeBot()],
     lastBotActivity: { 5: NOW - 30_000 },
     orderFlow: { stuckIdleOrders: 0, oldestStuckIdleMs: null, filledEntriesWithoutExit: 0 },
+    botCapital: [],
     paperFillPatchApplied: true,
     ...overrides,
   };
@@ -163,6 +164,39 @@ describe("runHealthChecks", () => {
     );
 
     expect(find(fresh, "bots.stalled").status).toBe("ok");
+  });
+
+  it("says out loud when a bot is at its capital cap", () => {
+    // The failure this exists for: the executor refuses every entry and the
+    // refusal log is throttled, so a capped bot looks identical to an idle one.
+    const capped = runHealthChecks(
+      makeInput({ botCapital: [{ botId: 5, name: "Bronze Dud Bolt", maxCapital: 1000, committed: 1926 }] }),
+    );
+
+    expect(find(capped, "bots.capital").status).toBe("warn");
+    expect(find(capped, "bots.capital").value).toBe("1 at cap");
+    expect(find(capped, "bots.capital").detail).toContain("Bronze Dud Bolt (1926/1000)");
+  });
+
+  it("reports headroom for a bot that still has room", () => {
+    const roomy = runHealthChecks(
+      makeInput({ botCapital: [{ botId: 5, name: "Bronze Dud Bolt", maxCapital: 1000, committed: 400 }] }),
+    );
+
+    expect(find(roomy, "bots.capital").status).toBe("ok");
+    expect(find(roomy, "bots.capital").detail).toContain("(400/1000)");
+  });
+
+  it("treats a bot exactly at its cap as capped, since the next entry cannot fit", () => {
+    const exact = runHealthChecks(
+      makeInput({ botCapital: [{ botId: 5, name: "Bronze Dud Bolt", maxCapital: 1000, committed: 1000 }] }),
+    );
+
+    expect(find(exact, "bots.capital").status).toBe("warn");
+  });
+
+  it("omits the capital check entirely when no bot has a cap", () => {
+    expect(runHealthChecks(makeInput()).checks.find((c) => c.id === "bots.capital")).toBeUndefined();
   });
 
   it("flags a stuck processing flag", () => {
