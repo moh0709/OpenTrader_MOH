@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { HealthInput } from "./health.js";
 import { runHealthChecks, rollUp, timeframeToMs } from "./health.js";
-import { makeBot } from "./test-fixtures.js";
+import { makeBot, makeGridSettings } from "./test-fixtures.js";
 
 const NOW = 1_786_362_000_000;
 
@@ -197,6 +197,41 @@ describe("runHealthChecks", () => {
 
   it("omits the capital check entirely when no bot has a cap", () => {
     expect(runHealthChecks(makeInput()).checks.find((c) => c.id === "bots.capital")).toBeUndefined();
+  });
+
+  it("says when the profit floor is moving exits past the grid spacing", () => {
+    // Hermes Bot in the live fleet: a 40-point ETH grid at qty 0.05 with a 3.00
+    // floor needs 60 points, so every exit was quietly 50% further out.
+    const report = runHealthChecks(
+      makeInput({
+        bots: [makeBot({ minProfit: 3, settings: makeGridSettings([2520, 2480], 0.05) })],
+      }),
+    );
+
+    const check = find(report, "bots.minProfit");
+    expect(check.status).toBe("warn");
+    expect(check.value).toBe("1 lifted");
+    expect(check.detail).toContain("+60.00");
+    expect(check.detail).toContain("+40.00");
+  });
+
+  it("stays quiet when the grid spacing already earns the floor", () => {
+    const report = runHealthChecks(
+      makeInput({ bots: [makeBot({ minProfit: 3, settings: makeGridSettings([4410, 4360], 0.22) })] }),
+    );
+
+    expect(find(report, "bots.minProfit").status).toBe("ok");
+  });
+
+  it("omits the profit floor check when no bot has a floor", () => {
+    expect(runHealthChecks(makeInput()).checks.find((c) => c.id === "bots.minProfit")).toBeUndefined();
+  });
+
+  it("explains a quiet grid bot by its run policy, not by the candle feed", () => {
+    const quiet = runHealthChecks(makeInput({ lastBotActivity: { 5: NOW - 3_600_000 } }));
+
+    expect(find(quiet, "bots.stalled").detail).toContain("run only when one of their own trades completes");
+    expect(find(quiet, "bots.stalled").detail).toContain("bots.capital");
   });
 
   it("flags a stuck processing flag", () => {

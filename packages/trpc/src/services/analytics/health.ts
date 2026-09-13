@@ -6,6 +6,7 @@
  * threshold unit testable, including the failure cases, which is the only way to
  * be confident a monitor will actually fire when it matters.
  */
+import { parseGridLines } from "./grid.js";
 import type { AnalyticsBot, AnalyticsTicker } from "./types.js";
 
 export type HealthStatus = "ok" | "warn" | "crit" | "unknown";
@@ -361,6 +362,9 @@ export function runHealthChecks(input: HealthInput): HealthReport {
 
   // --- Bot liveness -------------------------------------------------------
   const enabledBots = input.bots.filter((bot) => bot.enabled);
+  // A grid bot's silence has a different meaning from a trend bot's, so the
+  // stall message needs to know which is which.
+  const gridBotNames = new Set(enabledBots.filter((bot) => bot.template === "gridBot").map((bot) => bot.name));
   const stalled: string[] = [];
   const stuckProcessing: string[] = [];
 
@@ -400,7 +404,11 @@ export function runHealthChecks(input: HealthInput): HealthReport {
     value: stalled.length > 0 ? `${stalled.length} quiet` : "all active",
     detail:
       stalled.length > 0
-        ? `No recent strategy execution for: ${stalled.join(", ")}. This is expected for a bot waiting on a slow timeframe, but persistent silence usually means the candle stream dropped.`
+        ? `No recent strategy execution for: ${stalled.join(", ")}. Expected for a bot waiting on a slow timeframe.${
+            stalled.some((name) => gridBotNames.has(name))
+              ? " Some of these are grid bots, which run only when one of their own trades completes - so silence can also mean nothing can complete, and a bot at its capital cap can never break out of it on its own. Check bots.capital before suspecting the feed."
+              : ""
+          } Otherwise persistent silence usually means the candle stream dropped.`
         : "Every enabled bot has executed recently.",
     metric: stalled.length,
   });
@@ -432,6 +440,64 @@ export function runHealthChecks(input: HealthInput): HealthReport {
               .map((bot) => `${bot.name} (${bot.committed.toFixed(0)}/${bot.maxCapital.toFixed(0)})`)
               .join(", ")}.`,
       metric: capped.length,
+    });
+  }
+
+  /*
+   * The profit floor, and what it is doing to the exits.
+   *
+   * minProfit does not refuse anything, so it leaves no refusal to notice: it
+   * rewrites the take profit upward to whatever earns the floor. Deliberate,
+   * and documented in bot-limits - but a grid configured to take profit every
+   * 40 points of ETH that is quietly exiting 60 points out is running a
+   * different strategy from the one on the screen, and nothing said so.
+   *
+   * The comparison only works where the levels are legible, so it is limited to
+   * grids and reports the widest lift across adjacent levels.
+   */
+  const lifted: Array<{ name: string; by: number; asked: number; required: number }> = [];
+
+  for (const bot of enabledBots) {
+    if (bot.minProfit === null || bot.minProfit <= 0) continue;
+
+    const lines = parseGridLines(bot.settings);
+    if (lines.length < 2) continue;
+
+    for (let i = 0; i < lines.length - 1; i += 1) {
+      // parseGridLines sorts highest first, so the lower line is the buy.
+      const buy = lines[i + 1]!;
+      const gap = Math.abs(lines[i]!.price - buy.price);
+      if (buy.quantity <= 0) continue;
+
+      const required = bot.minProfit / buy.quantity;
+      if (required <= gap) continue;
+
+      const existing = lifted.find((entry) => entry.name === bot.name);
+      if (!existing || required - gap > existing.by) {
+        const record = { name: bot.name, by: required - gap, asked: gap, required };
+        if (existing) Object.assign(existing, record);
+        else lifted.push(record);
+      }
+    }
+  }
+
+  if (enabledBots.some((bot) => bot.minProfit !== null && bot.minProfit > 0)) {
+    checks.push({
+      id: "bots.minProfit",
+      group: "Bots",
+      label: "Profit floor",
+      status: lifted.length > 0 ? "warn" : "ok",
+      value: lifted.length > 0 ? `${lifted.length} lifted` : "within grid spacing",
+      detail:
+        lifted.length > 0
+          ? `The minimum-profit floor is moving exits further out than the grid asks for: ${lifted
+              .map(
+                (entry) =>
+                  `${entry.name} exits at +${entry.required.toFixed(2)} instead of the configured +${entry.asked.toFixed(2)} (lifted ${entry.by.toFixed(2)})`,
+              )
+              .join(", ")}. The floor is doing what it was set to do, but these bots are trading a wider target than their grid shows, which makes a close less likely.`
+          : "Every grid's own spacing already earns its minimum-profit floor, so no exit is being moved.",
+      metric: lifted.length,
     });
   }
 
