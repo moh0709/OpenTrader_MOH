@@ -18,7 +18,7 @@ beforeEach(resetFixtureIds);
  * The rule under test, mirroring `buildHealthView` in `dashboard-views.ts`.
  * Kept here so the logic is covered without standing up the whole view layer.
  */
-function countStuckIdle(trades: AnalyticsSmartTrade[]) {
+function countStuckIdle(trades: AnalyticsSmartTrade[], cappedBotIds = new Set<number>()) {
   let stuck = 0;
 
   for (const trade of trades) {
@@ -27,6 +27,7 @@ function countStuckIdle(trades: AnalyticsSmartTrade[]) {
     for (const order of trade.orders) {
       if (order.status !== "Idle") continue;
       if (!isEntryOrder(order) && !entryFilled) continue;
+      if (isEntryOrder(order) && trade.botId !== null && cappedBotIds.has(trade.botId)) continue;
 
       stuck += 1;
     }
@@ -54,6 +55,30 @@ const idleEntry = () =>
   ]);
 
 describe("stuck idle orders", () => {
+  it("does not flag an entry the capital cap is deliberately refusing", () => {
+    // A capped bot refuses every entry by design. Reporting that as a stuck
+    // order turned a configured limit into an hourly page; bots.capital is
+    // where this condition belongs, and it says so plainly.
+    const trade = idleEntry();
+
+    expect(countStuckIdle([trade])).toBe(1);
+    expect(countStuckIdle([trade], new Set([trade.botId!]))).toBe(0);
+  });
+
+  it("still flags an idle entry on a bot that has room to trade", () => {
+    const trade = idleEntry();
+
+    expect(countStuckIdle([trade], new Set([999]))).toBe(1);
+  });
+
+  it("still flags an idle exit over a filled entry even on a capped bot", () => {
+    // The cap explains why nothing new opens. It does not explain an exit that
+    // was never placed over a position we are actually holding.
+    const trade = idleExitAfterFilledEntry();
+
+    expect(countStuckIdle([trade], new Set([trade.botId!]))).toBe(1);
+  });
+
   it("does not flag an exit waiting behind an unfilled entry", () => {
     // The normal resting state of every grid level that has not traded yet.
     expect(countStuckIdle([idleExitBehindUnfilledEntry()])).toBe(0);

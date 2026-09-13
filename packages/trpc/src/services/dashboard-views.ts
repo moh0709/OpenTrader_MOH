@@ -290,26 +290,6 @@ export function buildHealthView(input: HealthViewInput): HealthReport & { databa
   // the entry fills, so an idle exit behind an unfilled entry is the normal
   // resting state, not a stuck order. Counting those would make this check fire
   // permanently, which is worse than not having it.
-  let stuckIdleOrders = 0;
-  let oldestStuckIdleMs: number | null = null;
-
-  for (const trade of derived.context.trades) {
-    const entryFilled = filledEntries(trade).length > 0;
-
-    for (const order of trade.orders) {
-      if (order.status !== "Idle") continue;
-
-      const isEntry = isEntryOrder(order);
-      // An entry should be placed as soon as the bot runs; an exit only once its
-      // entry has filled.
-      if (!isEntry && !entryFilled) continue;
-
-      stuckIdleOrders += 1;
-      const age = derived.context.now - order.createdAt.getTime();
-      if (oldestStuckIdleMs === null || age > oldestStuckIdleMs) oldestStuckIdleMs = age;
-    }
-  }
-
   /*
    * What each capped bot currently has at stake.
    *
@@ -346,6 +326,34 @@ export function buildHealthView(input: HealthViewInput): HealthReport & { databa
 
       return { botId: bot.id, name: bot.name, maxCapital: bot.maxCapital!, committed };
     });
+
+  // Bots whose cap is already engaged. Their idle entries are refusals, not faults.
+  const cappedBotIds = new Set(botCapital.filter((bot) => bot.committed >= bot.maxCapital).map((bot) => bot.botId));
+
+  let stuckIdleOrders = 0;
+  let oldestStuckIdleMs: number | null = null;
+
+  for (const trade of derived.context.trades) {
+    const entryFilled = filledEntries(trade).length > 0;
+
+    for (const order of trade.orders) {
+      if (order.status !== "Idle") continue;
+
+      const isEntry = isEntryOrder(order);
+      // An entry should be placed as soon as the bot runs; an exit only once its
+      // entry has filled.
+      if (!isEntry && !entryFilled) continue;
+      // An entry the capital cap is refusing is not stuck: nothing is failing to
+      // place it, a limit is deliberately holding it back, and bots.capital says
+      // so in as many words. Counting it here reported a configured limit as a
+      // fault and paged about it hourly.
+      if (isEntry && trade.botId !== null && cappedBotIds.has(trade.botId)) continue;
+
+      stuckIdleOrders += 1;
+      const age = derived.context.now - order.createdAt.getTime();
+      if (oldestStuckIdleMs === null || age > oldestStuckIdleMs) oldestStuckIdleMs = age;
+    }
+  }
 
   const report = runHealthChecks({
     now: derived.context.now,
