@@ -1,6 +1,6 @@
 import type { Candle } from "@opentrader/ai-team";
 import { describe, expect, it } from "vitest";
-import { peakSince } from "./positions.js";
+import { barMs, candlesNeeded, MAX_CANDLE_LIMIT, peakSince } from "./positions.js";
 
 /**
  * The high-water mark a trailing exit is measured against.
@@ -124,5 +124,70 @@ describe("what counts as an occupied slot", () => {
       const doorCountsIt = status === "Idle" || status === "Placed" || status === "Filled";
       expect(slotTaken(status, false), status).toBe(doorCountsIt);
     }
+  });
+});
+
+/**
+ * One fetch, two masters.
+ *
+ * The window has to warm the indicators *and* cover the position's whole life,
+ * because `peakSince` can only see what this fetch returned. The failure this
+ * guards is the quiet one: on a short timeframe with a multi-day hold, a fixed
+ * 120-bar window reconstructs a peak from the last few hours only - the trail
+ * never arms, take profit still works, and nothing anywhere logs that the
+ * trailing exit has gone blind.
+ */
+describe("candlesNeeded", () => {
+  const policy = (timeframe: string, regimeFilterPeriod = 0) => ({
+    timeframe,
+    limits: { regimeFilterPeriod },
+  });
+
+  it("fetches the warm-up window when nothing is open", () => {
+    expect(candlesNeeded(policy("1h"))).toBe(120);
+  });
+
+  it("grows for the regime filter, which reads a 200-period average", () => {
+    expect(candlesNeeded(policy("1h", 200))).toBe(220);
+  });
+
+  it("extends backwards to cover an open position", () => {
+    // 15m bars: a position opened 30 hours ago needs 120 bars + 24 of overhang.
+    const now = 1_700_000_000_000;
+    const openedAt = now - 30 * 3_600_000;
+
+    expect(candlesNeeded(policy("15m"), openedAt, now)).toBe(144);
+  });
+
+  it("leaves a short-lived position on the warm-up window", () => {
+    const now = 1_700_000_000_000;
+    const openedAt = now - 3 * 3_600_000;
+
+    expect(candlesNeeded(policy("1h"), openedAt, now)).toBe(120);
+  });
+
+  it("caps at the widest limit venues answer without paginating", () => {
+    // 1m bars, sixty days open: 86,400 bars wanted - clamped, because an
+    // exchange error here would skip the symbol entirely.
+    const now = 1_700_000_000_000;
+    const openedAt = now - 60 * 86_400_000;
+
+    expect(candlesNeeded(policy("1m"), openedAt, now)).toBe(MAX_CANDLE_LIMIT);
+  });
+
+  it("treats a position opened in the future as clock skew, not a demand", () => {
+    const now = 1_700_000_000_000;
+
+    expect(candlesNeeded(policy("1h"), now + 3_600_000, now)).toBe(120);
+    expect(candlesNeeded(policy("1h"), Number.NaN, now)).toBe(120);
+  });
+
+  it("falls back to an hour for a bar size it does not know", () => {
+    expect(barMs("15m")).toBe(900_000);
+    expect(barMs("weird")).toBe(3_600_000);
+
+    const now = 1_700_000_000_000;
+    const openedAt = now - 500 * 3_600_000;
+    expect(candlesNeeded(policy("weird"), openedAt, now)).toBe(524);
   });
 });

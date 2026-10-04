@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { mutate, query, type ClientConfig } from "./client.js";
+import { mutate, query, rest, type ClientConfig } from "./client.js";
 
 /**
  * MCP server exposing OpenTrader to an AI agent.
@@ -284,7 +284,9 @@ export function createServer(config: ClientConfig): McpServer {
         "problem with a single bot, and never on your own initiative. To close one bot use close_bot_deals. " +
         "You must pass confirm: true, which you should only do after the user has explicitly agreed.",
       inputSchema: {
-        confirm: z.literal(true).describe("Must be true. Only set this after the user explicitly asked to close everything."),
+        confirm: z
+          .literal(true)
+          .describe("Must be true. Only set this after the user explicitly asked to close everything."),
         mode: modeSchema,
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -292,6 +294,228 @@ export function createServer(config: ClientConfig): McpServer {
     async ({ confirm, mode }) => {
       try {
         return ok(await mutate(config, "smartTrade.closeAll", { confirm, mode: mode ?? "market" }));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  // ------------------------------------------------- the desk's own reasoning
+
+  server.registerTool(
+    "get_trading_head",
+    {
+      title: "Read the autonomous trading head",
+      description:
+        "Everything about the autonomous trading head in one read: whether it is armed, whether it is in observe or " +
+        "live mode, its watchlist and limits, the positions it currently holds, and its recent decisions with the " +
+        "reason each one gave. This is the tool for 'what is the AI doing and why'. " +
+        "Deliberately one call rather than four — reading the policy from one call and the positions from another " +
+        "invites reporting a decision next to a position it has already closed. " +
+        "Note that most minutes end in 'hold', so an empty decision list usually means the head is not running: " +
+        "check the `head` block and health_report before concluding the market is quiet.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).optional().describe("Recent decisions to return, default 25"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ limit }) => {
+      try {
+        return ok(await rest(config, "/autopilot", { params: { limit: limit ?? 25 } }));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_council_conclusion",
+    {
+      title: "Read the research council's conclusion",
+      description:
+        "The research council's standing conclusion per symbol: the bull and bear cases, the conviction it " +
+        "assigned, and the capital cap the governor holds each bot at as a result. " +
+        "Use get_council_transcript for the actual analyst reports and the debate behind the number. " +
+        "This is the deep twice-daily research run, which is a different thing from the per-minute trading head: it " +
+        "is context, not an instruction, and it can be days old. The governor using it is reduce-only by " +
+        "construction — it can throttle a bot's capital and can never raise it.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      try {
+        return ok(await rest(config, "/regime"));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_council_transcript",
+    {
+      title: "Read the council's full analyst debate",
+      description:
+        "The full analyst reports and bull/bear debate behind one symbol's latest conviction. " +
+        "This is the reasoning, not the verdict — reach for it when you need to know *why* the council concluded " +
+        "what it did, or when asked to explain a capital-cap change. " +
+        "It is a long document by nature; do not fetch it speculatively for every symbol.",
+      inputSchema: {
+        symbol: z.string().describe("The market to read, e.g. BTC/USDT"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ symbol }) => {
+      try {
+        return ok(await rest(config, "/regime/transcript", { params: { symbol } }));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_ai_activity",
+    {
+      title: "Read what the AI has been doing",
+      description:
+        "The AI action feed: every council call, order, risk block, capital-cap change and settings change the " +
+        "system made, newest last. This is the causal record — it answers 'the desk stood still, what did it " +
+        "think?', where get_trading_head answers only what it last decided. " +
+        "The cursor is a SEQUENCE NUMBER, not a timestamp: pass since: 0 on the first call to get a cursor, then " +
+        "pass that cursor back. Passing a timestamp silently returns nothing, and passing 0 every time replays the " +
+        "whole buffer. The buffer is in-memory and does not survive a daemon restart — the response reports " +
+        "`restarted: true` when your session is stale, so you can tell 'nothing happened' from 'the record was " +
+        "lost'.",
+      inputSchema: {
+        since: z.number().int().min(0).optional().describe("Sequence cursor; 0 on the first call"),
+        session: z.string().optional().describe("Session id from a previous response"),
+        limit: z.number().int().min(1).max(500).optional().describe("Max entries, default 200"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ since, session, limit }) => {
+      try {
+        return ok(
+          await rest(config, "/ai/actions", {
+            params: { since: since ?? 0, ...(session ? { session } : {}), limit: limit ?? 200 },
+          }),
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_health_report",
+    {
+      title: "Read platform health",
+      description:
+        "The platform health checks with an ok/warn/crit rollup: daemon, API, market-data freshness, exchange " +
+        "connectivity, bots, orders, database, and the AI's own journal and budget. " +
+        "Check this whenever the desk is not behaving as expected — the most expensive failure modes (stale market " +
+        "data, a refused entry, a capital cap, an unreadable journal) all look exactly like 'the market is quiet' " +
+        "from the outside, and this is what distinguishes them. " +
+        "Crit entries name the specific error; report it rather than retrying and hoping. " +
+        "Two to expect routinely: a restart disables every bot (the system's own orphan-cleanup, not a fault), and " +
+        "an unreadable journal restricts the head to exits only.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      try {
+        return ok(await rest(config, "/health"));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_performance",
+    {
+      title: "Read realised performance",
+      description:
+        "Realised performance: closed round trips with net profit after fees, win rate, average P&L and P&L per " +
+        "hour, plus the per-bot leaderboard. This is the tool for 'is this actually performing'. " +
+        "Figures are net of fees — the entry fee actually charged plus the estimated exit fee — so a strategy that " +
+        "only clears its costs by a basis point does not look like one that comfortably clears them. " +
+        "Two honest caveats. Realised P&L is not the whole picture: open positions carry unrealised P&L excluded " +
+        "here, so read get_trading_head or list_open_deals before calling a book 'flat' or 'winning'. And a small " +
+        "sample proves nothing — a handful of round trips is not an edge, and neither is a good week.",
+      inputSchema: {
+        botId: z.number().int().positive().optional().describe("Restrict to one bot"),
+        metric: z
+          .enum(["netPnl", "pnlPercent", "trades", "winRate", "averagePnl", "pnlPerHour"])
+          .optional()
+          .describe("Leaderboard ranking metric, default netPnl"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ botId, metric }) => {
+      try {
+        return ok(
+          await rest(config, "/snapshot", { params: { ...(botId ? { botId } : {}), ...(metric ? { metric } : {}) } }),
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  // -------------------------------------------------------- head arm / disarm
+
+  server.registerTool(
+    "set_head_mode",
+    {
+      title: "Arm or disarm the trading head",
+      description:
+        "Switch the autonomous trading head on or off, or move it between observe and live. " +
+        "'observe' plans and journals every decision without placing anything — it is how you find out what the " +
+        "head would have done before it does it, and it is the default. Only 'live' places real orders. " +
+        "CRITICAL: disarming does NOT close open positions. It stops the head deciding; everything it already " +
+        "holds stays on the exchange with nothing managing it. To actually exit, use close_bot_deals. " +
+        "Moving a running head to live starts it trading real money, so only do it when the user has asked for " +
+        "that specifically.",
+      inputSchema: {
+        armed: z.boolean().describe("true to switch the head on, false to switch it off"),
+        mode: z
+          .enum(["observe", "live"])
+          .optional()
+          .describe("Defaults to observe — arming and going live are separate decisions"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ armed, mode }) => {
+      try {
+        const path = armed ? "/actions/autopilot.arm" : "/actions/autopilot.disarm";
+        const body = armed ? { mode: mode ?? "observe" } : {};
+
+        return ok(await rest(config, path, { method: "POST", body }));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "run_head_pass",
+    {
+      title: "Run one trading head pass now",
+      description:
+        "Run a single trading head pass immediately instead of waiting for its interval, and return what it decided " +
+        "for every symbol. It does exactly what the next scheduled pass would have done and no more — but if the " +
+        "head is live, that pass places real orders, so this is NOT a dry run. A head in observe mode is the honest " +
+        "way to preview what it would do. " +
+        "Cooldown and minimum-hold rules still apply, so this will often correctly report that the head may not act " +
+        "yet. That is an answer, not a failure — report it rather than retrying to force a trade.",
+      inputSchema: {},
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async () => {
+      try {
+        return ok(await rest(config, "/actions/autopilot.runNow", { method: "POST", body: {} }));
       } catch (err) {
         return fail(err);
       }

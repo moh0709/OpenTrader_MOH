@@ -11,6 +11,9 @@
  * numbers an agent reads are by construction the numbers on screen.
  */
 import { randomUUID } from "node:crypto";
+import { access, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eventBus } from "@opentrader/event-bus";
 import { xprisma } from "@opentrader/db";
@@ -57,7 +60,7 @@ import { disarmRegime, syncRegime } from "../regime/regime.service.js";
 import { tradingHead } from "../autonomy/head.service.js";
 import { loadAutopilotPolicy, saveAutopilotPolicy } from "../autonomy/policy.js";
 import { loadOpenPositions, summariseBook } from "../autonomy/positions.js";
-import { openedNotionalToday, recentDecisions } from "../autonomy/journal.js";
+import { journalStatus, openedNotionalToday, recentDecisions } from "../autonomy/journal.js";
 import { logger } from "@opentrader/logger";
 import type {
   Actor,
@@ -96,6 +99,42 @@ const num = (value: unknown): number | undefined => {
 };
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+
+/** Fallback port when the socket reports no host at all. */
+const PORT = Number(process.env.PORT) || 5000;
+
+/**
+ * Locate the built MCP bundle to serve as a download.
+ *
+ * Searched for rather than hard-coded, because the same code runs from a source
+ * checkout (`packages/mcp-server/dist/cli.mjs`) and from the bundled app image
+ * (`app/dist/...`), where the relative layout differs entirely. Returning null is
+ * a supported answer: the route turns it into a 503 that says how to build it,
+ * which beats a 500 from a missing path.
+ */
+async function findMcpBundle(): Promise<{ path: string } | null> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    // Bundled app: the package is copied next to the running code in the image.
+    join(here, "..", "..", "..", "mcp-server", "dist", "cli.mjs"),
+    join(here, "..", "..", "mcp-server", "dist", "cli.mjs"),
+    // Source checkout and local dev.
+    join(here, "..", "..", "..", "..", "..", "packages", "mcp-server", "dist", "cli.mjs"),
+    join(process.cwd(), "packages", "mcp-server", "dist", "cli.mjs"),
+  ];
+
+  for (const path of candidates) {
+    try {
+      await access(path);
+
+      return { path };
+    } catch {
+      // Not here; try the next layout.
+    }
+  }
+
+  return null;
+}
 
 /**
  * Control actions in the words the AI action feed shows.
@@ -305,6 +344,38 @@ function aiHealthChecks(): HealthCheck[] {
   return checks;
 }
 
+/**
+ * Whether the head's journal can still be read and written.
+ *
+ * The journal is not a log file to the head: it holds the day's opening
+ * budget, the cooldowns and the exit-in-flight guard. While it cannot be
+ * read the head refuses new entries on its own — exits keep working — so this
+ * check turns red exactly when the head is running restricted, and names the
+ * error rather than leaving an operator to infer it from quiet trades.
+ */
+async function journalHealthCheck(): Promise<HealthCheck> {
+  // One cheap read, so the status below is *measured* on this request rather
+  // than remembered from whenever the head last passed.
+  await recentDecisions(1);
+  const status = journalStatus();
+  const ok = status.readable && status.writable;
+  const failing = !status.readable ? "reads" : !status.writable ? "writes" : null;
+
+  return {
+    id: "head.journal",
+    group: "AI",
+    label: "Trading head journal",
+    status: ok ? "ok" : "crit",
+    value: ok ? "readable" : `${failing} failing`,
+    detail: ok
+      ? "The head's budget, cooldowns and decision trail are all available."
+      : `The autopilot journal failed a ${failing}: ${
+          (!status.readable ? status.lastReadError : status.lastWriteError) ?? "unknown error"
+        }. New entries are refused until it recovers; exits and resting stops are unaffected. Run \`prisma db push\` if the table is missing.`,
+    metric: null,
+  };
+}
+
 export async function dashboardRestRoutes(fastify: FastifyInstance) {
   /** Authenticate every route in this plugin and apply the read rate limit. */
   fastify.addHook("preHandler", async (request: AuthedRequest, reply: FastifyReply) => {
@@ -354,61 +425,329 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     },
     controlEnabled: !agentAccess.isFrozen(),
     queries: [
-      { path: "GET /api/dash/snapshot", params: { metric: "netPnl|pnlPercent|trades|winRate|averagePnl|pnlPerHour", recentTradeLimit: "number" }, description: "Fleet overview, per-bot stats and leaderboard." },
+      {
+        path: "GET /api/dash/snapshot",
+        params: { metric: "netPnl|pnlPercent|trades|winRate|averagePnl|pnlPerHour", recentTradeLimit: "number" },
+        description: "Fleet overview, per-bot stats and leaderboard.",
+      },
       { path: "GET /api/dash/health", params: {}, description: "Health checks with an ok/warn/crit rollup." },
-      { path: "GET /api/dash/trades", params: { botId: "number", symbol: "string", outcome: "win|loss|breakeven", from: "epoch ms", to: "epoch ms", sort: "exitAt|netPnl|pnlPercent|holdMs", direction: "asc|desc", limit: "1-500", offset: "number" }, description: "Closed round trips with realised profit." },
-      { path: "GET /api/dash/positions", params: { botId: "number", state: "live|abandoned|missing", includePending: "boolean" }, description: "Open positions, abandoned positions and resting entry orders." },
+      {
+        path: "GET /api/dash/trades",
+        params: {
+          botId: "number",
+          symbol: "string",
+          outcome: "win|loss|breakeven",
+          from: "epoch ms",
+          to: "epoch ms",
+          sort: "exitAt|netPnl|pnlPercent|holdMs",
+          direction: "asc|desc",
+          limit: "1-500",
+          offset: "number",
+        },
+        description: "Closed round trips with realised profit.",
+      },
+      {
+        path: "GET /api/dash/positions",
+        params: { botId: "number", state: "live|abandoned|missing", includePending: "boolean" },
+        description: "Open positions, abandoned positions and resting entry orders.",
+      },
       { path: "GET /api/dash/grid", params: { botId: "number" }, description: "Grid ladder state per level." },
-      { path: "GET /api/dash/history", params: { botId: "number", bucket: "5m|15m|1h|4h|1d", from: "epoch ms", to: "epoch ms" }, description: "Equity curve and distributions." },
-      { path: "GET /api/dash/events", params: { since: "epoch ms cursor, 0 to initialise", limit: "1-200" }, description: "Events since a cursor. Pass 0 first to get a cursor without replaying history." },
-      { path: "GET /api/dash/logs", params: { botId: "number", limit: "1-200" }, description: "Recent bot log entries." },
-      { path: "GET /api/dash/actions/log", params: { since: "epoch ms" }, description: "Audit trail of control actions." },
-      { path: "GET /api/dash/ai/actions", params: { since: "sequence cursor, 0 to initialise", session: "session id from a previous response", limit: "1-500" }, description: "What the AI has done, newest last: council calls, orders, risk blocks, cap changes and settings changes. In-memory since the daemon started; the cursor is a sequence number, not a timestamp." },
-      { path: "GET /api/dash/ai/status", params: {}, description: "Whether the AI is configured, switched on, how many unattended actions it has left, and today's token spend against its budget." },
-      { path: "GET /api/dash/positions/stranded", params: { botId: "number" }, description: "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run." },
-      { path: "GET /api/dash/bots/:botId/purge-preview", params: {}, description: "What purging a bot would delete, and whether it is currently allowed. Read-only." },
+      {
+        path: "GET /api/dash/history",
+        params: { botId: "number", bucket: "5m|15m|1h|4h|1d", from: "epoch ms", to: "epoch ms" },
+        description: "Equity curve and distributions.",
+      },
+      {
+        path: "GET /api/dash/events",
+        params: { since: "epoch ms cursor, 0 to initialise", limit: "1-200" },
+        description: "Events since a cursor. Pass 0 first to get a cursor without replaying history.",
+      },
+      {
+        path: "GET /api/dash/logs",
+        params: { botId: "number", limit: "1-200" },
+        description: "Recent bot log entries.",
+      },
+      {
+        path: "GET /api/dash/actions/log",
+        params: { since: "epoch ms" },
+        description: "Audit trail of control actions.",
+      },
+      {
+        path: "GET /api/dash/ai/actions",
+        params: {
+          since: "sequence cursor, 0 to initialise",
+          session: "session id from a previous response",
+          limit: "1-500",
+        },
+        description:
+          "What the AI has done, newest last: council calls, orders, risk blocks, cap changes and settings changes. In-memory since the daemon started; the cursor is a sequence number, not a timestamp.",
+      },
+      {
+        path: "GET /api/dash/ai/status",
+        params: {},
+        description:
+          "Whether the AI is configured, switched on, how many unattended actions it has left, and today's token spend against its budget.",
+      },
+      {
+        path: "GET /api/dash/positions/stranded",
+        params: { botId: "number" },
+        description:
+          "Positions holding stock with no exit order, and what recovery would place for each. Read-only dry run.",
+      },
+      {
+        path: "GET /api/dash/bots/:botId/purge-preview",
+        params: {},
+        description: "What purging a bot would delete, and whether it is currently allowed. Read-only.",
+      },
       { path: "GET /api/dash/bots/:botId/limits", params: {}, description: "A bot's capital cap and minimum profit." },
-      { path: "GET /api/dash/regime", params: {}, description: "Research convictions per symbol and the capital cap the governor holds each bot at." },
-      { path: "GET /api/dash/regime/history", params: { limit: "1-200" }, description: "Conviction history per symbol, oldest first, for drawing how the council changed its mind." },
-      { path: "GET /api/dash/regime/transcript", params: { symbol: "string" }, description: "The full analyst reports and bull/bear debate behind a symbol's latest conviction." },
-      { path: "GET /api/dash/regime/runs", params: { limit: "1-200" }, description: "Recent research runs with cost and duration." },
-      { path: "GET /api/dash/autopilot", params: { limit: "1-200 recent decisions" }, description: "The trading head: its standing orders, the positions it holds, what it decided most recently and why, and which outside sources it is reading." },
+      {
+        path: "GET /api/dash/regime",
+        params: {},
+        description: "Research convictions per symbol and the capital cap the governor holds each bot at.",
+      },
+      {
+        path: "GET /api/dash/regime/history",
+        params: { limit: "1-200" },
+        description: "Conviction history per symbol, oldest first, for drawing how the council changed its mind.",
+      },
+      {
+        path: "GET /api/dash/regime/transcript",
+        params: { symbol: "string" },
+        description: "The full analyst reports and bull/bear debate behind a symbol's latest conviction.",
+      },
+      {
+        path: "GET /api/dash/regime/runs",
+        params: { limit: "1-200" },
+        description: "Recent research runs with cost and duration.",
+      },
+      {
+        path: "GET /api/dash/autopilot",
+        params: { limit: "1-200 recent decisions" },
+        description:
+          "The trading head: its standing orders, the positions it holds, what it decided most recently and why, and which outside sources it is reading.",
+      },
       { path: "GET /api/dash/shares", params: {}, description: "Share links, their status and who is watching." },
-      { path: "GET /api/dash/shares/watchers", params: {}, description: "Recipients watching a shared feed right now." },
+      {
+        path: "GET /api/dash/shares/watchers",
+        params: {},
+        description: "Recipients watching a shared feed right now.",
+      },
     ],
     actions: [
-      { path: "POST /api/dash/actions/bot.start", body: { botId: "number" }, scope: "control", description: "Start a bot." },
-      { path: "POST /api/dash/actions/bot.stop", body: { botId: "number" }, scope: "control", description: "Stop a bot. Resting exit orders are cancelled, which strands any open position." },
-      { path: "POST /api/dash/actions/bot.restart", body: { botId: "number" }, scope: "control", description: "Stop then start a bot." },
-      { path: "POST /api/dash/actions/position.recoverStranded", body: { botId: "number, optional", limit: "1-200, default 25" }, scope: "control", description: "Place replacement exit orders for stranded positions at their original target prices. Check GET /positions/stranded first." },
-      { path: "POST /api/dash/actions/bot.purgeTrades", body: { botId: "number" }, scope: "control", description: "Delete every trade of a bot, open and closed. Destructive and irreversible. Cancels live orders first and refuses while the bot is running. Check the purge-preview first." },
-      { path: "POST /api/dash/actions/bot.setLimits", body: { botId: "number", maxCapital: "number, 0 clears", minProfit: "number, 0 clears" }, scope: "control", description: "Cap the capital a bot may commit at once, and the minimum profit a cycle must make before its exit is allowed to close." },
-      { path: "POST /api/dash/shares", body: { name: "string", email: "string", expiresAt: "ISO date" }, scope: "control", description: "Issue a read-only live-feed link for one person, on one device, until the expiry. Emails it and returns the URL." },
-      { path: "POST /api/dash/shares/:id/revoke | /release", body: {}, scope: "control", description: "Revoke a link, or free it from the device holding it." },
+      {
+        path: "POST /api/dash/actions/bot.start",
+        body: { botId: "number" },
+        scope: "control",
+        description: "Start a bot.",
+      },
+      {
+        path: "POST /api/dash/actions/bot.stop",
+        body: { botId: "number" },
+        scope: "control",
+        description: "Stop a bot. Resting exit orders are cancelled, which strands any open position.",
+      },
+      {
+        path: "POST /api/dash/actions/bot.restart",
+        body: { botId: "number" },
+        scope: "control",
+        description: "Stop then start a bot.",
+      },
+      {
+        path: "POST /api/dash/actions/position.recoverStranded",
+        body: { botId: "number, optional", limit: "1-200, default 25" },
+        scope: "control",
+        description:
+          "Place replacement exit orders for stranded positions at their original target prices. Check GET /positions/stranded first.",
+      },
+      {
+        path: "POST /api/dash/actions/bot.purgeTrades",
+        body: { botId: "number" },
+        scope: "control",
+        description:
+          "Delete every trade of a bot, open and closed. Destructive and irreversible. Cancels live orders first and refuses while the bot is running. Check the purge-preview first.",
+      },
+      {
+        path: "POST /api/dash/actions/bot.setLimits",
+        body: { botId: "number", maxCapital: "number, 0 clears", minProfit: "number, 0 clears" },
+        scope: "control",
+        description:
+          "Cap the capital a bot may commit at once, and the minimum profit a cycle must make before its exit is allowed to close.",
+      },
+      {
+        path: "POST /api/dash/shares",
+        body: { name: "string", email: "string", expiresAt: "ISO date" },
+        scope: "control",
+        description:
+          "Issue a read-only live-feed link for one person, on one device, until the expiry. Emails it and returns the URL.",
+      },
+      {
+        path: "POST /api/dash/shares/:id/revoke | /release",
+        body: {},
+        scope: "control",
+        description: "Revoke a link, or free it from the device holding it.",
+      },
       { path: "DELETE /api/dash/shares/:id", body: {}, scope: "control", description: "Delete a share link." },
-      { path: "POST /api/dash/actions/regime.setPolicy", body: { botId: "number", baselineMaxCapital: "number, defaults to the bot's current cap", armed: "boolean", floorFactor: "0-1", maxAgeMs: "number" }, scope: "control", description: "Put a bot under regime management. The baseline is the governor's ceiling: it may reduce below it and can never exceed it." },
-      { path: "POST /api/dash/actions/regime.unmanage", body: { botId: "number" }, scope: "control", description: "Remove a bot from regime management and restore its baseline cap." },
-      { path: "POST /api/dash/actions/regime.disarm", body: {}, scope: "control", description: "Disarm the governor and restore every managed bot to its baseline cap immediately." },
-      { path: "POST /api/dash/actions/regime.sync", body: {}, scope: "control", description: "Reconcile caps against the latest convictions now, without waiting for the poll." },
-      { path: "POST /api/dash/actions/regime.runNow", body: { symbols: "string[], optional" }, scope: "control", description: "Ask the research council to run now, out of schedule." },
-      { path: "POST /api/dash/actions/autopilot.setPolicy", body: { enabled: "boolean", mode: "observe|live", symbols: "string[]", botId: "number", intervalSec: "number", timeframe: "1m|5m|15m|1h|4h|1d", "…limits": "maxPositionQuote, maxTotalExposureQuote, maxOpenPositions, maxDailyOpenNotionalQuote, maxDailyLossQuote, maxConsecutiveLosses, minConfidence, minExitConfidence, takeProfitPercent, stopLossPercent, trailStartPercent, trailGivebackPercent, minHoldMs, cooldownMs, maxHoldMs, roundTripFeeBps, allowPyramiding, killSwitch" }, scope: "control", description: "Set the trading head's standing orders. Numbers are clamped into their bounds rather than refused. Mode 'observe' plans and journals without placing anything; only 'live' trades." },
-      { path: "POST /api/dash/actions/autopilot.arm", body: { mode: "observe|live, default observe" }, scope: "control", description: "Switch the trading head on. Defaults to observe, so arming and going live are two separate decisions." },
-      { path: "POST /api/dash/actions/autopilot.disarm", body: {}, scope: "control", description: "Switch the trading head off. Open positions are left exactly as they are — this stops it deciding, it does not close anything." },
-      { path: "POST /api/dash/actions/autopilot.runNow", body: {}, scope: "control", description: "Run one pass now instead of waiting for the interval, and return what it decided for every symbol." },
-      { path: "GET /api/dash/learning", params: { limit: "1-100", status: "proposed|applied|reverted|dismissed" }, description: "The learning journal: loss-streak post-mortems and their adjustment proposals." },
-      { path: "POST /api/dash/actions/learning.evaluate", body: {}, scope: "control", description: "Run the loss-streak sweep now instead of waiting for the timer." },
-      { path: "POST /api/dash/actions/learning.apply", body: { id: "number" }, scope: "control", description: "Apply a journal proposal to the bot's settings. Values are clamped into guardrails; the previous settings are snapshotted for revert." },
-      { path: "POST /api/dash/actions/learning.revert", body: { id: "number" }, scope: "control", description: "Restore the bot's settings to the snapshot taken when a proposal was applied." },
-      { path: "POST /api/dash/actions/learning.dismiss", body: { id: "number" }, scope: "control", description: "Dismiss a proposal without applying it." },
-      { path: "GET /api/dash/ai-settings", params: {}, description: "The saved LLM configuration (key masked) for the AI council." },
-      { path: "POST /api/dash/actions/ai-settings.save", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Save and instantly apply the AI council's provider/model. provider 'none' disables it." },
-      { path: "POST /api/dash/actions/ai-models", body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Fetch the models a provider offers, for the settings picker. Each is { id, name, description, free, contextLength }; `free` is true when the model says so or prices at zero." },
-      { path: "POST /api/dash/actions/ai-settings.test", body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" }, scope: "control", description: "Verify a provider configuration by asking the model to answer. Returns { ok, model, message } where message is the provider's own reason when it refused. Deliberately a completion and not a model listing: some gateways serve /models unauthenticated, so a listing proves nothing about the key, the credit or the model id." },
-      { path: "POST /api/dash/actions/ai-chat", body: { messages: "[{ role: user|assistant, content: string }]" }, scope: "control", description: "Ask the configured model about the fleet. Returns { reply, proposals, model }. Executes nothing — a proposal is carried out by a separate call to ai-execute." },
-      { path: "POST /api/dash/actions/ai-execute", body: { proposal: "{ action, params, why }", autonomous: "boolean, optional" }, scope: "control", description: `Carry out one proposal from ai-chat. Allowed actions: ${Object.keys(ALLOWED_ACTIONS).join(", ")}. Dispatched through the same guarded route an operator would call, so scope, freeze, rate limit and audit all apply. With autonomous:true it also spends from the unattended-action budget, which is enforced here and not in the browser.` },
-      { path: "POST /api/dash/actions/ai.disable", body: { reason: "string, optional" }, scope: "control", description: "Stop the AI acting or answering. Unlike /actions/freeze this leaves your own control endpoints working, so you can clean up after it." },
-      { path: "POST /api/dash/actions/ai.enable", body: {}, scope: "control", description: "Let the AI act again, and start its unattended-action allowance over." },
-      { path: "POST /api/dash/actions/freeze", body: { frozen: "boolean" }, scope: "admin", description: "Disable or re-enable all agent control." },
+      {
+        path: "POST /api/dash/actions/regime.setPolicy",
+        body: {
+          botId: "number",
+          baselineMaxCapital: "number, defaults to the bot's current cap",
+          armed: "boolean",
+          floorFactor: "0-1",
+          maxAgeMs: "number",
+        },
+        scope: "control",
+        description:
+          "Put a bot under regime management. The baseline is the governor's ceiling: it may reduce below it and can never exceed it.",
+      },
+      {
+        path: "POST /api/dash/actions/regime.unmanage",
+        body: { botId: "number" },
+        scope: "control",
+        description: "Remove a bot from regime management and restore its baseline cap.",
+      },
+      {
+        path: "POST /api/dash/actions/regime.disarm",
+        body: {},
+        scope: "control",
+        description: "Disarm the governor and restore every managed bot to its baseline cap immediately.",
+      },
+      {
+        path: "POST /api/dash/actions/regime.sync",
+        body: {},
+        scope: "control",
+        description: "Reconcile caps against the latest convictions now, without waiting for the poll.",
+      },
+      {
+        path: "POST /api/dash/actions/regime.runNow",
+        body: { symbols: "string[], optional" },
+        scope: "control",
+        description: "Ask the research council to run now, out of schedule.",
+      },
+      {
+        path: "POST /api/dash/actions/autopilot.setPolicy",
+        body: {
+          enabled: "boolean",
+          mode: "observe|live",
+          symbols: "string[]",
+          botId: "number",
+          intervalSec: "number",
+          timeframe: "1m|5m|15m|1h|4h|1d",
+          "…limits":
+            "maxPositionQuote, maxTotalExposureQuote, maxOpenPositions, maxDailyOpenNotionalQuote, maxDailyLossQuote, maxConsecutiveLosses, minConfidence, minExitConfidence, takeProfitPercent, stopLossPercent, trailStartPercent, trailGivebackPercent, minHoldMs, cooldownMs, maxHoldMs, roundTripFeeBps, allowPyramiding, killSwitch",
+        },
+        scope: "control",
+        description:
+          "Set the trading head's standing orders. Numbers are clamped into their bounds rather than refused. Mode 'observe' plans and journals without placing anything; only 'live' trades.",
+      },
+      {
+        path: "POST /api/dash/actions/autopilot.arm",
+        body: { mode: "observe|live, default observe" },
+        scope: "control",
+        description:
+          "Switch the trading head on. Defaults to observe, so arming and going live are two separate decisions.",
+      },
+      {
+        path: "POST /api/dash/actions/autopilot.disarm",
+        body: {},
+        scope: "control",
+        description:
+          "Switch the trading head off. Open positions are left exactly as they are — this stops it deciding, it does not close anything.",
+      },
+      {
+        path: "POST /api/dash/actions/autopilot.runNow",
+        body: {},
+        scope: "control",
+        description:
+          "Run one pass now instead of waiting for the interval, and return what it decided for every symbol.",
+      },
+      {
+        path: "GET /api/dash/learning",
+        params: { limit: "1-100", status: "proposed|applied|reverted|dismissed" },
+        description: "The learning journal: loss-streak post-mortems and their adjustment proposals.",
+      },
+      {
+        path: "POST /api/dash/actions/learning.evaluate",
+        body: {},
+        scope: "control",
+        description: "Run the loss-streak sweep now instead of waiting for the timer.",
+      },
+      {
+        path: "POST /api/dash/actions/learning.apply",
+        body: { id: "number" },
+        scope: "control",
+        description:
+          "Apply a journal proposal to the bot's settings. Values are clamped into guardrails; the previous settings are snapshotted for revert.",
+      },
+      {
+        path: "POST /api/dash/actions/learning.revert",
+        body: { id: "number" },
+        scope: "control",
+        description: "Restore the bot's settings to the snapshot taken when a proposal was applied.",
+      },
+      {
+        path: "POST /api/dash/actions/learning.dismiss",
+        body: { id: "number" },
+        scope: "control",
+        description: "Dismiss a proposal without applying it.",
+      },
+      {
+        path: "GET /api/dash/ai-settings",
+        params: {},
+        description: "The saved LLM configuration (key masked) for the AI council.",
+      },
+      {
+        path: "POST /api/dash/actions/ai-settings.save",
+        body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" },
+        scope: "control",
+        description: "Save and instantly apply the AI council's provider/model. provider 'none' disables it.",
+      },
+      {
+        path: "POST /api/dash/actions/ai-models",
+        body: { provider: "string", apiKey: "string, optional", baseUrl: "string, optional" },
+        scope: "control",
+        description:
+          "Fetch the models a provider offers, for the settings picker. Each is { id, name, description, free, contextLength }; `free` is true when the model says so or prices at zero.",
+      },
+      {
+        path: "POST /api/dash/actions/ai-settings.test",
+        body: { provider: "string", model: "string", apiKey: "string, optional", baseUrl: "string, optional" },
+        scope: "control",
+        description:
+          "Verify a provider configuration by asking the model to answer. Returns { ok, model, message } where message is the provider's own reason when it refused. Deliberately a completion and not a model listing: some gateways serve /models unauthenticated, so a listing proves nothing about the key, the credit or the model id.",
+      },
+      {
+        path: "POST /api/dash/actions/ai-chat",
+        body: { messages: "[{ role: user|assistant, content: string }]" },
+        scope: "control",
+        description:
+          "Ask the configured model about the fleet. Returns { reply, proposals, model }. Executes nothing — a proposal is carried out by a separate call to ai-execute.",
+      },
+      {
+        path: "POST /api/dash/actions/ai-execute",
+        body: { proposal: "{ action, params, why }", autonomous: "boolean, optional" },
+        scope: "control",
+        description: `Carry out one proposal from ai-chat. Allowed actions: ${Object.keys(ALLOWED_ACTIONS).join(", ")}. Dispatched through the same guarded route an operator would call, so scope, freeze, rate limit and audit all apply. With autonomous:true it also spends from the unattended-action budget, which is enforced here and not in the browser.`,
+      },
+      {
+        path: "POST /api/dash/actions/ai.disable",
+        body: { reason: "string, optional" },
+        scope: "control",
+        description:
+          "Stop the AI acting or answering. Unlike /actions/freeze this leaves your own control endpoints working, so you can clean up after it.",
+      },
+      {
+        path: "POST /api/dash/actions/ai.enable",
+        body: {},
+        scope: "control",
+        description: "Let the AI act again, and start its unattended-action allowance over.",
+      },
+      {
+        path: "POST /api/dash/actions/freeze",
+        body: { frozen: "boolean" },
+        scope: "admin",
+        description: "Disable or re-enable all agent control.",
+      },
     ],
   }));
 
@@ -447,7 +786,9 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     });
   });
 
-  fastify.get("/grid", async (request) => buildGridView(await derived(), num((request.query as Record<string, unknown>).botId)));
+  fastify.get("/grid", async (request) =>
+    buildGridView(await derived(), num((request.query as Record<string, unknown>).botId)),
+  );
 
   fastify.get("/history", async (request) => {
     const query = request.query as Record<string, unknown>;
@@ -516,7 +857,11 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
   fastify.get("/health", async () => {
     const startedAt = Date.now();
-    const [context, lastBotActivity] = await Promise.all([derived(), dashboardService.lastBotActivity(OWNER_ID)]);
+    const [context, lastBotActivity, exchangeAccounts] = await Promise.all([
+      derived(),
+      dashboardService.lastBotActivity(OWNER_ID),
+      dashboardService.exchangeAccountsForHealth(),
+    ]);
 
     const report = buildHealthView({
       derived: context,
@@ -525,6 +870,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       process: dashboardService.processStats(),
       host: dashboardService.hostStats(),
       lastBotActivity,
+      exchangeAccounts,
       paperFillPatchApplied: dashboardService.hasPaperFillFix(),
       apiLatencyMs: Date.now() - startedAt - dashboardService.takeTickerWaitMs(),
     });
@@ -537,7 +883,7 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
      * provider are visible from this package, and the health report is a list
      * of checks with a worst-wins rollup, so adding to it is additive.
      */
-    const checks = [...report.checks, ...aiHealthChecks(), await phantomPositionCheck()];
+    const checks = [...report.checks, ...aiHealthChecks(), await phantomPositionCheck(), await journalHealthCheck()];
     const counts: Record<HealthStatus, number> = { ok: 0, warn: 0, crit: 0, unknown: 0 };
     for (const check of checks) counts[check.status] += 1;
 
@@ -594,7 +940,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const bot = (await xprisma.bot.findFirst({
       where: { id: botId, ownerId: OWNER_ID },
       select: { id: true, name: true, symbol: true, enabled: true, maxCapital: true, minProfit: true },
-    })) as { id: number; name: string; symbol: string; enabled: boolean; maxCapital: number | null; minProfit: number | null } | null;
+    })) as {
+      id: number;
+      name: string;
+      symbol: string;
+      enabled: boolean;
+      maxCapital: number | null;
+      minProfit: number | null;
+    } | null;
 
     if (!bot) return reply.code(404).send({ error: "not_found", message: "Bot not found" });
 
@@ -645,7 +998,9 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       action: "share.create",
       target: { email: result.share.email },
       outcome: "allowed",
-      detail: result.share.emailError ? `link created, email failed: ${result.share.emailError}` : "link created and emailed",
+      detail: result.share.emailError
+        ? `link created, email failed: ${result.share.emailError}`
+        : "link created and emailed",
     });
 
     return result.share;
@@ -665,7 +1020,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
       if (!(await run(id))) return reply.code(404).send({ error: "not_found", message: "Share link not found" });
 
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { id }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action,
+        target: { id },
+        outcome: "allowed",
+        detail: null,
+      });
 
       return { ok: true };
     });
@@ -680,7 +1042,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (id === undefined) return reply.code(400).send({ error: "bad_request", message: "id is required" });
     if (!(await deleteShare(id))) return reply.code(404).send({ error: "not_found", message: "Share link not found" });
 
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "share.delete", target: { id }, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "share.delete",
+      target: { id },
+      outcome: "allowed",
+      detail: null,
+    });
 
     return { ok: true };
   });
@@ -744,7 +1113,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const botId = num(body.botId);
 
     const deny = (code: number, error: string, detail: string) => {
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId: botId ?? null }, outcome: "denied", detail });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action,
+        target: { botId: botId ?? null },
+        outcome: "denied",
+        detail,
+      });
 
       // A refusal is worth seeing on the board too. An agent quietly failing to
       // act looks identical to an agent choosing not to, and they are very
@@ -764,13 +1140,21 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (botId === undefined) return deny(400, "bad_request", "botId is required");
 
     const limit = agentAccess.controlLimiter.check(actor.name);
-    if (!limit.allowed) return deny(429, "rate_limited", `Control rate limit reached, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s`);
+    if (!limit.allowed)
+      return deny(429, "rate_limited", `Control rate limit reached, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s`);
 
     try {
       await run(botId);
       // The cached context predates this change, so the next read must re-query.
       dashboardService.invalidate();
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action,
+        target: { botId },
+        outcome: "allowed",
+        detail: null,
+      });
       logger.info(`[Dashboard] ${actor.kind} "${actor.name}" performed ${action} on bot ${botId}`);
 
       recordAiAction({
@@ -788,7 +1172,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       return { ok: true, action, botId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action, target: { botId }, outcome: "failed", detail: message });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action,
+        target: { botId },
+        outcome: "failed",
+        detail: message,
+      });
 
       recordAiAction({
         chip: "denied",
@@ -847,7 +1238,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const permission = agentAccess.canControl(actor);
     if (!permission.allowed) {
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "position.recoverStranded", target: { botId: botId ?? null }, outcome: "denied", detail: permission.reason });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "position.recoverStranded",
+        target: { botId: botId ?? null },
+        outcome: "denied",
+        detail: permission.reason,
+      });
 
       return reply.code(403).send({ error: "forbidden", message: permission.reason });
     }
@@ -886,7 +1284,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const permission = agentAccess.canControl(actor);
     if (!permission.allowed) {
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "position.clearUnbacked", target: { botId: botId ?? null }, outcome: "denied", detail: permission.reason });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "position.clearUnbacked",
+        target: { botId: botId ?? null },
+        outcome: "denied",
+        detail: permission.reason,
+      });
 
       return reply.code(403).send({ error: "forbidden", message: permission.reason });
     }
@@ -943,8 +1348,8 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     return control(request, reply, "bot.setLimits", async (botId) => {
       await setBotLimits(botId, OWNER_ID, {
-        maxCapital: body.maxCapital === undefined ? undefined : num(body.maxCapital) ?? 0,
-        minProfit: body.minProfit === undefined ? undefined : num(body.minProfit) ?? 0,
+        maxCapital: body.maxCapital === undefined ? undefined : (num(body.maxCapital) ?? 0),
+        minProfit: body.minProfit === undefined ? undefined : (num(body.minProfit) ?? 0),
       });
     });
   });
@@ -954,14 +1359,30 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const actor = request.actor!;
 
     if (actor.kind !== "admin") {
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "freeze", target: {}, outcome: "denied", detail: "Admin only" });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "freeze",
+        target: {},
+        outcome: "denied",
+        detail: "Admin only",
+      });
 
-      return reply.code(403).send({ error: "forbidden", message: "Only the admin password may change the freeze switch." });
+      return reply
+        .code(403)
+        .send({ error: "forbidden", message: "Only the admin password may change the freeze switch." });
     }
 
     const frozen = (request.body as { frozen?: unknown } | undefined)?.frozen !== false;
     agentAccess.setFrozen(frozen);
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "freeze", target: { frozen }, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "freeze",
+      target: { frozen },
+      outcome: "allowed",
+      detail: null,
+    });
 
     return { ok: true, frozen };
   });
@@ -979,7 +1400,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const policies = (await xprisma.regimePolicy.findMany()) as RegimePolicyRow[];
     const bots = (await xprisma.bot.findMany({
       select: { id: true, name: true, symbol: true, enabled: true, maxCapital: true, minProfit: true },
-    })) as { id: number; name: string; symbol: string; enabled: boolean; maxCapital: number | null; minProfit: number | null }[];
+    })) as {
+      id: number;
+      name: string;
+      symbol: string;
+      enabled: boolean;
+      maxCapital: number | null;
+      minProfit: number | null;
+    }[];
 
     const symbols = [...new Set(bots.map((b) => b.symbol))];
     const convictions: Record<string, unknown> = {};
@@ -1105,7 +1533,9 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     // Said out loud, because moving somebody between billing tiers is not the
     // kind of thing that should happen quietly.
-    logger.info(`[AI] Saved settings migrated: ${row.provider} ${row.baseUrl ?? "(no URL)"} -> ${migrated.id} ${migrated.baseUrl}`);
+    logger.info(
+      `[AI] Saved settings migrated: ${row.provider} ${row.baseUrl ?? "(no URL)"} -> ${migrated.id} ${migrated.baseUrl}`,
+    );
 
     return { ...row, provider: migrated.id, baseUrl: migrated.baseUrl };
   };
@@ -1197,7 +1627,6 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     // reading this endpoint gets the same answer the picker shows.
     return { ok: true, models, freeCount: models.filter((model: ModelInfo) => model.free).length };
   });
-
 
   // --- Chat ----------------------------------------------------------------
 
@@ -1324,9 +1753,10 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const limit = chatLimiter.check(request.actor!.name);
     if (!limit.allowed) {
-      return reply
-        .code(429)
-        .send({ error: "rate_limited", message: `Too many questions at once, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s` });
+      return reply.code(429).send({
+        error: "rate_limited",
+        message: `Too many questions at once, retry in ${Math.ceil(limit.retryAfterMs / 1000)}s`,
+      });
     }
 
     const provider = resolveProvider();
@@ -1495,7 +1925,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const reason = str((request.body as Record<string, unknown> | undefined)?.reason) ?? `stopped by ${actor.name}`;
 
     aiGuards.killSwitch.stop(reason);
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai.disable", target: {}, outcome: "allowed", detail: reason });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "ai.disable",
+      target: {},
+      outcome: "allowed",
+      detail: reason,
+    });
     logger.warn(`[AI] disabled: ${reason}`);
 
     recordAiAction({ chip: "settings", severity: "warning", title: "AI switched off", detail: reason });
@@ -1512,7 +1949,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     // A deliberate re-enable starts the unattended allowance over: the operator
     // has looked at what happened and decided it may carry on.
     aiGuards.autonomy.reset();
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai.enable", target: {}, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "ai.enable",
+      target: {},
+      outcome: "allowed",
+      detail: null,
+    });
     logger.info(`[AI] re-enabled by ${actor.name}`);
 
     recordAiAction({ chip: "settings", title: "AI switched back on", detail: `Re-enabled by ${actor.name}.` });
@@ -1563,7 +2007,6 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     return { history };
   });
 
-
   /** The full debate behind one symbol's conviction, proxied from the council. */
   fastify.get("/regime/transcript", async (request, reply) => {
     const symbol = str((request.query as Record<string, unknown>).symbol);
@@ -1572,11 +2015,16 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const base = process.env.RESEARCH_URL || "http://127.0.0.1:8801";
     try {
       const res = await fetch(`${base}/convictions/latest/${encodeURIComponent(symbol)}/full`);
-      if (!res.ok) return reply.code(res.status).send({ error: "unavailable", message: `research service returned ${res.status}` });
+      if (!res.ok)
+        return reply
+          .code(res.status)
+          .send({ error: "unavailable", message: `research service returned ${res.status}` });
 
       return await res.json();
     } catch (error) {
-      return reply.code(503).send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
+      return reply
+        .code(503)
+        .send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -1585,11 +2033,16 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const base = process.env.RESEARCH_URL || "http://127.0.0.1:8801";
     try {
       const res = await fetch(`${base}/runs?limit=${num((request.query as Record<string, unknown>).limit) ?? 50}`);
-      if (!res.ok) return reply.code(res.status).send({ error: "unavailable", message: `research service returned ${res.status}` });
+      if (!res.ok)
+        return reply
+          .code(res.status)
+          .send({ error: "unavailable", message: `research service returned ${res.status}` });
 
       return await res.json();
     } catch (error) {
-      return reply.code(503).send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
+      return reply
+        .code(503)
+        .send({ error: "unavailable", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -1604,9 +2057,10 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const body = (request.body ?? {}) as Record<string, unknown>;
 
     return control(request, reply, "regime.setPolicy", async (botId) => {
-      const bot = (await xprisma.bot.findUnique({ where: { id: botId }, select: { maxCapital: true, minProfit: true } })) as
-        | { maxCapital: number | null; minProfit: number | null }
-        | null;
+      const bot = (await xprisma.bot.findUnique({
+        where: { id: botId },
+        select: { maxCapital: true, minProfit: true },
+      })) as { maxCapital: number | null; minProfit: number | null } | null;
 
       if (!bot) throw new Error(`No bot ${botId}`);
 
@@ -1664,14 +2118,28 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const permission = agentAccess.canControl(actor);
     if (!permission.allowed) {
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.disarm", target: {}, outcome: "denied", detail: permission.reason! });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "regime.disarm",
+        target: {},
+        outcome: "denied",
+        detail: permission.reason!,
+      });
 
       return reply.code(403).send({ error: "forbidden", message: permission.reason });
     }
 
     const result = await disarmRegime();
     dashboardService.invalidate();
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.disarm", target: result, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "regime.disarm",
+      target: result,
+      outcome: "allowed",
+      detail: null,
+    });
     logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" disarmed the regime governor`);
 
     return { ok: true, ...result };
@@ -1686,7 +2154,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     const result = await syncRegime();
     dashboardService.invalidate();
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.sync", target: result, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "regime.sync",
+      target: result,
+      outcome: "allowed",
+      detail: null,
+    });
 
     return { ok: true, ...result };
   });
@@ -1699,13 +2174,103 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
 
     const symbols = ((request.body ?? {}) as { symbols?: unknown }).symbols;
-    const ok = await requestResearchRun(Array.isArray(symbols) ? symbols.filter((s): s is string => typeof s === "string") : []);
+    const ok = await requestResearchRun(
+      Array.isArray(symbols) ? symbols.filter((s): s is string => typeof s === "string") : [],
+    );
 
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "regime.runNow", target: { symbols }, outcome: ok ? "allowed" : "failed", detail: ok ? null : "research service unreachable" });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "regime.runNow",
+      target: { symbols },
+      outcome: ok ? "allowed" : "failed",
+      detail: ok ? null : "research service unreachable",
+    });
 
-    if (!ok) return reply.code(503).send({ error: "unavailable", message: "The research service did not accept the run." });
+    if (!ok)
+      return reply.code(503).send({ error: "unavailable", message: "The research service did not accept the run." });
 
     return { ok: true, queued: true };
+  });
+
+  // --- The MCP server --------------------------------------------------------
+
+  /**
+   * Everything needed to connect an AI agent, in one JSON read.
+   *
+   * The main page's MCP panel renders from this rather than assembling URLs and
+   * config snippets itself, so the instructions can never drift from the routes
+   * that actually exist. It is authenticated like everything else here — the URL
+   * of an MCP endpoint that can close positions is not a secret, but the password
+   * that authenticates it is.
+   */
+  fastify.get("/mcp", async (request) => {
+    const query = request.query as Record<string, unknown>;
+    // Trust the proxy's forwarded host when present: the MCP URL has to be the one
+    // ChatGPT can actually reach, and on a TLS-terminating proxy the socket host is
+    // the proxy's loopback, not the public name the agent will dial.
+    const forwardedHost = str(request.headers["x-forwarded-host"]);
+    const forwardedProto = str(request.headers["x-forwarded-proto"]) ?? "http";
+    const host = forwardedHost ?? request.headers.host ?? `127.0.0.1:${PORT}`;
+    const endpoint = `${forwardedProto}://${host}/mcp`;
+    const base = forwardedProto === "https" ? endpoint : null;
+
+    return {
+      name: "opentrader",
+      /** Where to point a client. Null when this instance is not reachable over TLS. */
+      endpoint,
+      chatgptReady: Boolean(base),
+      /**
+       * Why it may be null. Said plainly rather than left for the operator to
+       * infer: ChatGPT refuses a plain-HTTP endpoint, so serving this over the
+       * open internet without a TLS proxy is the single most common reason a
+       * "working" MCP server will not connect from ChatGPT or a phone.
+       */
+      note: base
+        ? "This endpoint is reachable over HTTPS, so ChatGPT and the mobile apps can use it directly."
+        : "This endpoint is not behind HTTPS. ChatGPT and the mobile apps will refuse it — put it behind a TLS reverse proxy, or use the downloadable stdio server from a desktop client.",
+      /** The bundled build, for a desktop client that spawns it locally. */
+      download: "/api/dash/mcp/download",
+      toolCount: 19,
+      transports: {
+        streamableHttp: endpoint,
+        stdio: "Available in the download; used by Claude Desktop, Hermes and Codex.",
+      },
+      docs: "/api/dash/manifest",
+      ...(num(query.include) === 1 && str(query.token) ? { token: str(query.token) } : {}),
+    };
+  });
+
+  /**
+   * Serve the built MCP server as a download.
+   *
+   * A single self-contained file on purpose: it bundles the SDK and zod, so it
+   * runs with nothing installed next to it. That is the difference between a
+   * link someone clicks and a folder of dependencies someone gives up on.
+   */
+  fastify.get("/mcp/download", async (_request, reply) => {
+    const file = await findMcpBundle();
+
+    if (!file) {
+      return reply.code(503).send({
+        error: "mcp_not_built",
+        message:
+          "The MCP server bundle is not present. Run `moon run mcp-server:build` on the host, then reload. This is expected in a container built without the MCP target.",
+      });
+    }
+
+    const contents = await readFile(file.path, "utf8");
+
+    return (
+      reply
+        .header("content-type", "application/javascript; charset=utf-8")
+        .header("content-disposition", 'attachment; filename="opentrader-mcp.mjs"')
+        .header("cache-control", "no-store")
+        // A download that could execute anything must not be pulled into a page by a
+        // stray tag, and this file is by definition executable.
+        .header("content-security-policy", "default-src 'none'; sandbox")
+        .send(contents)
+    );
   });
 
   // --- The trading head ----------------------------------------------------
@@ -1779,8 +2344,17 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       const config = await saveAutopilotPolicy(body);
       dashboardService.invalidate();
 
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.setPolicy", target: { mode: config.mode, enabled: config.enabled }, outcome: "allowed", detail: null });
-      logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" set the trading head to ${config.enabled ? config.mode : "disarmed"} on ${config.symbols.join(", ") || "no symbols"}`);
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "autopilot.setPolicy",
+        target: { mode: config.mode, enabled: config.enabled },
+        outcome: "allowed",
+        detail: null,
+      });
+      logger.warn(
+        `[Dashboard] ${actor.kind} "${actor.name}" set the trading head to ${config.enabled ? config.mode : "disarmed"} on ${config.symbols.join(", ") || "no symbols"}`,
+      );
 
       recordAiAction({
         chip: "settings",
@@ -1794,7 +2368,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
       return { ok: true, policy: config };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.setPolicy", target: {}, outcome: "failed", detail: message });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "autopilot.setPolicy",
+        target: {},
+        outcome: "failed",
+        detail: message,
+      });
 
       return reply.code(409).send({ error: "action_failed", message });
     }
@@ -1819,7 +2400,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const config = await saveAutopilotPolicy({ enabled: true, mode });
     dashboardService.invalidate();
 
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.arm", target: { mode }, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "autopilot.arm",
+      target: { mode },
+      outcome: "allowed",
+      detail: null,
+    });
     logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" armed the trading head in ${mode} mode`);
 
     recordAiAction({
@@ -1851,7 +2439,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const config = await saveAutopilotPolicy({ enabled: false });
     dashboardService.invalidate();
 
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.disarm", target: {}, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "autopilot.disarm",
+      target: {},
+      outcome: "allowed",
+      detail: null,
+    });
     logger.warn(`[Dashboard] ${actor.kind} "${actor.name}" disarmed the trading head`);
 
     recordAiAction({
@@ -1874,7 +2469,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     const result = await tradingHead.runOnce();
     dashboardService.invalidate();
 
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "autopilot.runNow", target: { executed: result.executed }, outcome: "allowed", detail: result.reason ?? null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "autopilot.runNow",
+      target: { executed: result.executed },
+      outcome: "allowed",
+      detail: result.reason ?? null,
+    });
 
     return { ok: true, ...result };
   });
@@ -1887,7 +2489,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     if (!permission.allowed) return reply.code(403).send({ error: "forbidden", message: permission.reason });
 
     const result = await evaluateLearning(OWNER_ID);
-    agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.evaluate", target: {}, outcome: "allowed", detail: null });
+    agentAccess.record({
+      actor: actor.name,
+      actorKind: actor.kind,
+      action: "learning.evaluate",
+      target: {},
+      outcome: "allowed",
+      detail: null,
+    });
 
     return { ok: true, ...result };
   });
@@ -1905,12 +2514,21 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     try {
       const result = await applyLearning(id, OWNER_ID);
       dashboardService.invalidate();
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.apply", target: { id }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "learning.apply",
+        target: { id },
+        outcome: "allowed",
+        detail: null,
+      });
       logger.info(`[Dashboard] ${actor.kind} "${actor.name}" applied learning entry ${id}`);
 
       return { ok: true, ...result };
     } catch (error) {
-      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+      return reply
+        .code(409)
+        .send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -1926,11 +2544,20 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
     try {
       await revertLearning(id, OWNER_ID);
       dashboardService.invalidate();
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.revert", target: { id }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "learning.revert",
+        target: { id },
+        outcome: "allowed",
+        detail: null,
+      });
 
       return { ok: true, id };
     } catch (error) {
-      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+      return reply
+        .code(409)
+        .send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -1945,11 +2572,20 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
 
     try {
       await dismissLearning(id);
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "learning.dismiss", target: { id }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "learning.dismiss",
+        target: { id },
+        outcome: "allowed",
+        detail: null,
+      });
 
       return { ok: true, id };
     } catch (error) {
-      return reply.code(409).send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
+      return reply
+        .code(409)
+        .send({ error: "conflict", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -2019,7 +2655,14 @@ export async function dashboardRestRoutes(fastify: FastifyInstance) {
         update: { provider: "none", model: "", apiKey: null, baseUrl: null },
       });
       applyAiSettings(null);
-      agentAccess.record({ actor: actor.name, actorKind: actor.kind, action: "ai-settings.save", target: { provider: "none" }, outcome: "allowed", detail: null });
+      agentAccess.record({
+        actor: actor.name,
+        actorKind: actor.kind,
+        action: "ai-settings.save",
+        target: { provider: "none" },
+        outcome: "allowed",
+        detail: null,
+      });
       logger.info(`[Dashboard] ${actor.kind} "${actor.name}" disabled the AI council`);
 
       return { ok: true, enabled: false };

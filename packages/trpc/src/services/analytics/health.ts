@@ -134,6 +134,23 @@ export type HealthInput = {
   /** Whether the paper exchange limit-order fill fix is present in this build. */
   /** Capped bots and what each currently has committed, for the capital check. */
   botCapital: Array<{ botId: number; name: string; maxCapital: number; committed: number }>;
+  /**
+   * Exchange accounts, reduced to what the credential check needs.
+   *
+   * `botCount` is here so a credential-less account that nothing trades on stays
+   * quiet: an unused, unconfigured account is not a fault worth paging anyone
+   * about, and a monitor that cries wolf gets ignored exactly when it matters.
+   */
+  exchangeAccounts: Array<{
+    id: number;
+    exchangeCode: string;
+    name: string;
+    /** Demo/sandbox accounts trade without keys, so they are never in fault. */
+    isDemoAccount: boolean;
+    hasApiKey: boolean;
+    hasSecretKey: boolean;
+    botCount: number;
+  }>;
   paperFillPatchApplied: boolean | null;
   thresholds?: Partial<HealthThresholds>;
 };
@@ -351,12 +368,62 @@ export function runHealthChecks(input: HealthInput): HealthReport {
       label: "Market data freshness",
       status,
       value:
-        failed.length > 0 ? `${failed.length}/${input.tickers.length} failing` : `fetched ${formatDuration(oldestFetch)} ago`,
+        failed.length > 0
+          ? `${failed.length}/${input.tickers.length} failing`
+          : `fetched ${formatDuration(oldestFetch)} ago`,
       detail:
         failed.length > 0
           ? `Could not price: ${failed.map((ticker) => `${ticker.symbol} (${ticker.error})`).join(", ")}. Floating P&L is unavailable for those symbols.`
           : `${input.tickers.length} symbols tracked. Oldest exchange reading is ${formatDuration(oldestReading)} old, which reflects how actively the pair trades rather than a fault here.`,
       metric: oldestFetch,
+    });
+  }
+
+  // --- Exchange credentials ------------------------------------------------
+  //
+  // Placed before the ticker check on purpose. Tickers are public data, so they
+  // keep flowing and report `ok` even when every authenticated call fails — which
+  // is exactly how a desk can be green on the board, burning CPU, and completely
+  // unable to place an order for four weeks without anything going red.
+  //
+  // This is the check that would have caught it. It is `crit`, not `warn`,
+  // because a live account with no key cannot trade: that is not degraded, it is
+  // a desk that is down while appearing to run.
+  const credentialed = input.exchangeAccounts.filter((account) => !account.isDemoAccount);
+  // Every account something actually trades on, demo included. A demo-only
+  // install must still get the check and read `ok`: an absent check is ambiguous
+  // between "nothing to fault" and "could not read the accounts", and this is
+  // exactly the check whose silence cost four weeks.
+  const inUse = input.exchangeAccounts.filter((account) => account.botCount > 0);
+  // Only a live account can be in fault — a demo account trades with no key by
+  // design, so a missing one there is not a missing credential.
+  const unusable = inUse.filter((account) => !account.isDemoAccount && (!account.hasApiKey || !account.hasSecretKey));
+
+  if (inUse.length > 0) {
+    checks.push({
+      id: "exchange.credentials",
+      group: "Exchange",
+      label: "Exchange credentials",
+      status: unusable.length > 0 ? "crit" : "ok",
+      value: unusable.length > 0 ? `${unusable.length} unusable` : `${inUse.length} configured`,
+      detail:
+        unusable.length > 0
+          ? `Trading against ${unusable
+              .map(
+                (account) =>
+                  `${account.name} (${account.exchangeCode}, ${account.botCount} bot${account.botCount === 1 ? "" : "s"}) is missing its API key or secret`,
+              )
+              .join(
+                "; ",
+              )}. Bots on these accounts cannot place, read or cancel orders — entries recorded locally will never reach the venue, and positions can sit with no exit. Add the credentials under Settings → Exchanges.`
+          : credentialed.length > 0
+            ? `Every account with a bot on it has an API key and secret: ${inUse
+                .map((account) => `${account.exchangeCode} (${account.botCount})`)
+                .join(", ")}.`
+            : `Every account with a bot on it is a demo account, which trades without credentials by design: ${inUse
+                .map((account) => `${account.exchangeCode} (${account.botCount})`)
+                .join(", ")}.`,
+      metric: unusable.length,
     });
   }
 
@@ -435,7 +502,9 @@ export function runHealthChecks(input: HealthInput): HealthReport {
         capped.length > 0
           ? `At their capital cap and refusing new entries until a position closes: ${capped
               .map((bot) => `${bot.name} (${bot.committed.toFixed(0)}/${bot.maxCapital.toFixed(0)})`)
-              .join(", ")}. This is the cap working as configured, not a fault, but these bots will not open anything while it holds.`
+              .join(
+                ", ",
+              )}. This is the cap working as configured, not a fault, but these bots will not open anything while it holds.`
           : `Every capped bot has room to trade: ${input.botCapital
               .map((bot) => `${bot.name} (${bot.committed.toFixed(0)}/${bot.maxCapital.toFixed(0)})`)
               .join(", ")}.`,
@@ -495,7 +564,9 @@ export function runHealthChecks(input: HealthInput): HealthReport {
                 (entry) =>
                   `${entry.name} exits at +${entry.required.toFixed(2)} instead of the configured +${entry.asked.toFixed(2)} (lifted ${entry.by.toFixed(2)})`,
               )
-              .join(", ")}. The floor is doing what it was set to do, but these bots are trading a wider target than their grid shows, which makes a close less likely.`
+              .join(
+                ", ",
+              )}. The floor is doing what it was set to do, but these bots are trading a wider target than their grid shows, which makes a close less likely.`
           : "Every grid's own spacing already earns its minimum-profit floor, so no exit is being moved.",
       metric: lifted.length,
     });

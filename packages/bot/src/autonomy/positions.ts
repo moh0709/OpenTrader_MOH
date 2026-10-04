@@ -5,6 +5,79 @@ import { AUTOPILOT_REF_PREFIX } from "../trade-opener.js";
 import { lastExitRequest } from "./journal.js";
 
 /**
+ * Candle windows.
+ *
+ * One fetch per symbol per pass serves two masters: the indicators need a warm
+ * window, and the high-water mark a trailing exit is measured against needs to
+ * cover the position's whole life. The first is a constant; the second grows
+ * with the position, and getting it wrong is quiet - a peak reconstructed from
+ * too few candles reads low, the trail never arms, and nothing anywhere says
+ * so. Hence: fetch what the rules need, extended backwards over the position.
+ */
+
+/** Candles fetched when no position is being managed. Enough to warm every indicator with room over. */
+const CANDLE_LIMIT = 120;
+
+/**
+ * Hard ceiling on one fetch.
+ *
+ * The widest limit the supported venues answer without paginating; asking for
+ * more risks an error where a clamp would do. A position older than this many
+ * bars gets a partially observed peak: still never below the entry (callers
+ * floor it), still subject to take profit and stop - only the trail measures
+ * against the part of the peak this window saw.
+ */
+export const MAX_CANDLE_LIMIT = 1000;
+
+/**
+ * One candle, in milliseconds.
+ *
+ * A resting entry the market never came back to meet is cancelled after its
+ * bar, which is the rule the replay models and the reason the backtest is
+ * worth anything. Unknown bar sizes fall back to an hour rather than resting
+ * forever.
+ */
+const BAR_MS: Record<string, number> = {
+  "1m": 60_000,
+  "5m": 300_000,
+  "15m": 900_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "1d": 86_400_000,
+  "1w": 604_800_000,
+};
+
+export function barMs(timeframe: string): number {
+  return BAR_MS[timeframe] ?? 3_600_000;
+}
+
+/**
+ * How many candles one pass needs for this policy and this position.
+ *
+ * Starts from what the longest rule needs - the regime filter reads a moving
+ * average as long as the operator asks for, and `sma` returns null when handed
+ * too little history, so a filter set to 200 would be silently inert at a
+ * limit of 120 - and then extends backwards far enough to cover the position
+ * being managed, because `peakSince` can only see what this window fetched.
+ */
+export function candlesNeeded(
+  config: { timeframe: string; limits: { regimeFilterPeriod: number } },
+  openedAt?: number | null,
+  now = Date.now(),
+): number {
+  const base = Math.max(CANDLE_LIMIT, config.limits.regimeFilterPeriod + 20);
+  if (openedAt === null || openedAt === undefined || !Number.isFinite(openedAt)) return base;
+
+  // Twenty-four bars of overhang: the partial bar, the open candle, and room
+  // for the averages to settle after the jump in length.
+  const barsForPosition = Math.ceil((now - openedAt) / barMs(config.timeframe)) + 24;
+  // A position "opened" in the future is clock skew, not a demand for the future.
+  if (!Number.isFinite(barsForPosition) || barsForPosition <= 0) return base;
+
+  return Math.min(MAX_CANDLE_LIMIT, Math.max(base, barsForPosition));
+}
+
+/**
  * The book, as the trading head sees it.
  *
  * Reconstructed from orders rather than tracked in memory. A position is what

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_HEAD_LIMITS } from "@opentrader/ai-team";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AUTOPILOT, NUMERIC_BOUNDS, parseSymbols, toConfig } from "./policy.js";
+import { DEFAULT_AUTOPILOT, NUMERIC_BOUNDS, effectiveEquity, parseSymbols, toConfig } from "./policy.js";
 
 /**
  * The reader between the database row and the head's standing orders.
@@ -215,5 +215,28 @@ describe("entryOrderType", () => {
 
   it("defaults to crossing the spread", () => {
     expect(DEFAULT_AUTOPILOT.entryOrderType).toBe("market");
+  });
+});
+
+describe("effectiveEquity", () => {
+  it("keeps the operator's ceiling when the balance cannot be read", () => {
+    // Null means unknown, not broke: a transient account error must not refuse
+    // every entry — and it certainly must not widen anything.
+    expect(effectiveEquity(1000, null)).toBe(1000);
+    expect(effectiveEquity(1000, Number.NaN)).toBe(1000);
+    expect(effectiveEquity(1000, -5)).toBe(1000);
+  });
+
+  it("lowers the ceiling to what the account can really fund", () => {
+    expect(effectiveEquity(1000, 300)).toBe(300);
+  });
+
+  it("never raises the ceiling, whatever the account reports", () => {
+    // Reduce-or-refuse: a rich balance is not permission to exceed the policy.
+    expect(effectiveEquity(1000, 5000)).toBe(1000);
+  });
+
+  it("passes a drained account through as zero, which refuses by itself", () => {
+    expect(effectiveEquity(1000, 0)).toBe(0);
   });
 });

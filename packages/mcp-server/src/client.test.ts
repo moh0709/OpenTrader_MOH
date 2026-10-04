@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { configFromEnv, mutate, query, type ClientConfig } from "./client.js";
+import { configFromEnv, mutate, query, rest, type ClientConfig } from "./client.js";
 
 const config: ClientConfig = {
   baseUrl: "http://127.0.0.1:8000",
@@ -87,6 +87,58 @@ describe("mutate", () => {
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
       json: { smartTradeId: 3, mode: "market" },
     });
+  });
+});
+
+describe("rest", () => {
+  it("calls the dashboard prefix and unwraps plain JSON, not a tRPC envelope", async () => {
+    const calls = stubFetch({ ok: true, checks: [] });
+
+    const result = await rest(config, "/health");
+
+    expect(result).toEqual({ ok: true, checks: [] });
+    expect(calls[0].url).toBe("http://127.0.0.1:8000/api/dash/health");
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  it("sends the same admin password so one credential reaches both surfaces", async () => {
+    const calls = stubFetch({});
+
+    await rest(config, "/regime");
+
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe("secret");
+  });
+
+  it("omits undefined params rather than sending the string 'undefined'", async () => {
+    const calls = stubFetch({});
+
+    await rest(config, "/autopilot", { params: { limit: 25, symbol: undefined } });
+
+    expect(calls[0].url).toContain("limit=25");
+    expect(calls[0].url).not.toContain("symbol");
+  });
+
+  it("appends no question mark when there are no params", async () => {
+    const calls = stubFetch({});
+
+    await rest(config, "/health");
+
+    expect(calls[0].url).not.toContain("?");
+  });
+
+  it("posts a JSON body for an action", async () => {
+    const calls = stubFetch({ ok: true });
+
+    await rest(config, "/actions/autopilot.arm", { method: "POST", body: { mode: "observe" } });
+
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ mode: "observe" });
+  });
+
+  it("surfaces a 401 from the scoped surface with its message", async () => {
+    stubFetch({ error: "forbidden", message: "Token is read-only" }, 403);
+
+    await expect(rest(config, "/actions/autopilot.arm", { method: "POST", body: {} })).rejects.toThrow(/read-only/);
   });
 });
 

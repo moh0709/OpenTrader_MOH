@@ -177,9 +177,10 @@ export function buildPositionsView(derived: DerivedAnalytics, query: PositionQue
     return true;
   });
 
-  const pending = query.includePending === false
-    ? []
-    : derived.pendingEntries.filter((entry) => query.botId === undefined || entry.botId === query.botId);
+  const pending =
+    query.includePending === false
+      ? []
+      : derived.pendingEntries.filter((entry) => query.botId === undefined || entry.botId === query.botId);
 
   return {
     positions,
@@ -248,11 +249,7 @@ export function buildEventsView(
   since: number,
   limit = 50,
 ): { events: DashboardEvent[]; cursor: number } {
-  const latest = Math.max(
-    derived.roundTrips[0]?.exitAt ?? 0,
-    ...logs.map((log) => log.createdAt.getTime()),
-    0,
-  );
+  const latest = Math.max(derived.roundTrips[0]?.exitAt ?? 0, ...logs.map((log) => log.createdAt.getTime()), 0);
 
   if (since <= 0) return { events: [], cursor: latest || derived.context.now };
 
@@ -274,6 +271,7 @@ export type HealthViewInput = {
   process: HealthInput["process"];
   host: HealthInput["host"];
   lastBotActivity: Record<number, number>;
+  exchangeAccounts: HealthInput["exchangeAccounts"];
   paperFillPatchApplied: boolean | null;
   apiLatencyMs: number;
   thresholds?: HealthInput["thresholds"];
@@ -378,6 +376,7 @@ export function buildHealthView(input: HealthViewInput): HealthReport & { databa
     },
     botCapital,
     paperFillPatchApplied: input.paperFillPatchApplied,
+    exchangeAccounts: input.exchangeAccounts,
     thresholds: input.thresholds,
   });
 

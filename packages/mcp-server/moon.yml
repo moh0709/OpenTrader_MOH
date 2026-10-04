@@ -15,4 +15,10 @@ tasks:
   typecheck:
     command: tsc --noEmit
   test:
+    # The e2e test spawns the *built* server, so `test` has to build first.
+    # Without this dependency moon runs them in parallel, tsup's `clean` wipes
+    # dist/cli.mjs mid-spawn, and the failure is an opaque MCP protocol error
+    # rather than anything pointing at the build.
     command: vitest
+    deps:
+      - build

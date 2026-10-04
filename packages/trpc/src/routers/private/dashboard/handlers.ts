@@ -87,9 +87,10 @@ export async function getLogs({ ctx, input }: Options<TDashboardLogsSchema>) {
 export async function getHealth({ ctx }: { ctx: { user: User } }) {
   const startedAt = Date.now();
 
-  const [context, lastBotActivity] = await Promise.all([
+  const [context, lastBotActivity, exchangeAccounts] = await Promise.all([
     derived(ctx.user),
     dashboardService.lastBotActivity(ctx.user.id),
+    dashboardService.exchangeAccountsForHealth(),
   ]);
 
   return buildHealthView({
@@ -99,6 +100,7 @@ export async function getHealth({ ctx }: { ctx: { user: User } }) {
     process: dashboardService.processStats(),
     host: dashboardService.hostStats(),
     lastBotActivity,
+    exchangeAccounts,
     paperFillPatchApplied: dashboardService.hasPaperFillFix(),
     apiLatencyMs: Date.now() - startedAt - dashboardService.takeTickerWaitMs(),
   });

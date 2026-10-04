@@ -266,7 +266,7 @@ export const aiChatWidget = {
     const autoSwitch = el("button", {
       class: "chip chip--filter chat__auto",
       type: "button",
-      text: "Autopilot",
+      text: "Auto-run",
       "aria-pressed": "false",
       title: "Let approved proposals run without asking each time",
     });
@@ -283,7 +283,7 @@ export const aiChatWidget = {
       autoRemaining = on ? AUTOPILOT_ACTIONS : 0;
       autoSwitch.dataset.on = String(on);
       autoSwitch.setAttribute("aria-pressed", String(on));
-      autoSwitch.textContent = on ? `Autopilot · ${autoRemaining}` : "Autopilot";
+      autoSwitch.textContent = on ? `Auto-run · ${autoRemaining}` : "Auto-run";
       document.dispatchEvent(new CustomEvent("opentrader:autopilot", { detail: { armed: on } }));
     };
 
@@ -294,7 +294,7 @@ export const aiChatWidget = {
       if (!autopilot) return;
 
       setAutopilot(false);
-      say("Autopilot off. Proposals wait for you again.");
+      say("Auto-run off. Proposals wait for you again.");
     };
 
     document.addEventListener("opentrader:autopilot-disarm", onDisarmRequest);
@@ -302,13 +302,13 @@ export const aiChatWidget = {
     autoSwitch.addEventListener("click", () => {
       if (autopilot) {
         setAutopilot(false);
-        say("Autopilot off. Proposals wait for you again.");
+        say("Auto-run off. Proposals wait for you again.");
         return;
       }
 
       const agreed = window.confirm(
         [
-          "Arm autopilot?",
+          "Arm auto-run?",
           "",
           "Anything the model proposes will run immediately, without asking you first — starting and stopping bots, changing capital limits, replacing exit orders, applying learning proposals.",
           "",
@@ -321,13 +321,13 @@ export const aiChatWidget = {
       if (!agreed) return;
 
       setAutopilot(true);
-      say("Autopilot armed. Everything it does appears in the AI actions window.", "danger");
+      say("Auto-run armed. Everything it does appears in the AI actions window.", "danger");
 
       window.setTimeout(() => {
         if (!autopilot) return;
 
         setAutopilot(false);
-        say(`Autopilot disarmed itself after ${AUTOPILOT_MS / 60000} minutes.`);
+        say(`Auto-run disarmed itself after ${AUTOPILOT_MS / 60000} minutes.`);
       }, AUTOPILOT_MS);
     });
 
@@ -343,11 +343,11 @@ export const aiChatWidget = {
           // Trusting the browser's own subtraction would let a reload hand the
           // AI twenty fresh actions it had already spent.
           autoRemaining = typeof outcome.autonomyRemaining === "number" ? outcome.autonomyRemaining : autoRemaining - 1;
-          autoSwitch.textContent = `Autopilot · ${autoRemaining}`;
+          autoSwitch.textContent = `Auto-run · ${autoRemaining}`;
 
           if (autoRemaining <= 0) {
             setAutopilot(false);
-            say("Autopilot has used its allowance of unattended actions and disarmed.");
+            say("Auto-run has used its allowance of unattended actions and disarmed.");
           }
         }
       } catch (error) {
@@ -358,7 +358,7 @@ export const aiChatWidget = {
         // same belief.
         if (autopilot) {
           setAutopilot(false);
-          say(`Autopilot disarmed: ${error.message}`, "danger");
+          say(`Auto-run disarmed: ${error.message}`, "danger");
         }
 
         toast({ title: "Action refused", message: error.message, severity: "danger" });

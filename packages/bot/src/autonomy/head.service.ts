@@ -26,9 +26,10 @@ import { IntelDesk, deskOptionsFromEnv, type MarketIntel } from "@opentrader/mar
 import type { ICandlestick } from "@opentrader/types";
 import { closeSmartTrade } from "../trade-closer.js";
 import { AUTOPILOT_REF_PREFIX, openSmartTrade, type ManualTradeLimits } from "../trade-opener.js";
-import { lastActionAt, openedNotionalToday, pruneJournal, recordDecision } from "./journal.js";
-import { loadAutopilotPolicy, type AutopilotConfig } from "./policy.js";
-import { loadOpenPositions, peakSince, summariseBook } from "./positions.js";
+import { journalStatus, lastActionAt, openedNotionalToday, pruneJournal, recordDecision } from "./journal.js";
+import { effectiveEquity, loadAutopilotPolicy, type AutopilotConfig } from "./policy.js";
+import { barMs, candlesNeeded, loadOpenPositions, peakSince, summariseBook } from "./positions.js";
+import { SingleFlight } from "./single-flight.js";
 
 /**
  * The trading head.
@@ -62,46 +63,17 @@ import { loadOpenPositions, peakSince, summariseBook } from "./positions.js";
  * that was set before it spoke.
  */
 
-/** Candles fetched per symbol. Enough to warm every indicator with room over. */
-const CANDLE_LIMIT = 120;
-
-/**
- * How many candles this policy needs.
- *
- * The regime filter reads a moving average as long as the operator asks for,
- * and 200 of them do not fit in the 120 this used to fetch. `sma` returns null
- * when it is handed too little history, and a null reads as "no opinion" — so a
- * filter set to 200 would have been silently inert, which is the worst of the
- * three possible behaviours. Fetch what the longest rule actually needs, with a
- * little over for the averages to settle.
- */
-function candlesNeeded(config: AutopilotConfig): number {
-  return Math.max(CANDLE_LIMIT, config.limits.regimeFilterPeriod + 20);
-}
-
 /** Until the policy has been read, poll at the conservative default. */
 const DEFAULT_INTERVAL_MS = 60_000;
 
 /**
- * One candle, in milliseconds.
+ * Reported when a pass is asked for while one is already running.
  *
- * A resting entry the market never came back to meet is cancelled after its bar,
- * which is the rule the replay models and the reason the backtest is worth
- * anything. Unknown bar sizes fall back to an hour rather than resting forever.
+ * The timer and `runNow` share one gate — see `runOnce` — so this is what an
+ * operator sees when they press "run now" during a slow pass: an answer,
+ * rather than a second head sizing against a book the first is still moving.
  */
-const BAR_MS: Record<string, number> = {
-  "1m": 60_000,
-  "5m": 300_000,
-  "15m": 900_000,
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "1d": 86_400_000,
-  "1w": 604_800_000,
-};
-
-function barMs(timeframe: string): number {
-  return BAR_MS[timeframe] ?? 3_600_000;
-}
+export const PASS_BUSY = "A pass is already running; passes never overlap.";
 
 /** How often an unchanged hold is written down anyway, so quiet leaves a trail. */
 const HOLD_HEARTBEAT_MS = 30 * 60 * 1000;
@@ -228,7 +200,15 @@ function doorLimits(config: AutopilotConfig): ManualTradeLimits {
 export class TradingHead {
   private timer: NodeJS.Timeout | null = null;
   private desk = new IntelDesk(deskOptionsFromEnv());
-  private running = false;
+  /** Single gate for every caller: the timer and `runNow` both enter through it. */
+  private pass = new SingleFlight<HeadPassResult>(() => ({
+    ran: false,
+    mode: null,
+    reason: PASS_BUSY,
+    considered: 0,
+    executed: 0,
+    outcomes: [],
+  }));
   /** The interval the timer is currently on, so a changed policy can rebuild it. */
   private intervalMs: number | null = null;
 
@@ -243,6 +223,12 @@ export class TradingHead {
 
   /** The last decision logged per symbol, so the journal shows changes only. */
   private lastLogged = new Map<string, { fingerprint: string; at: number }>();
+
+  /** Last equity reading actually reported, so a static balance logs once, not every pass. */
+  private lastEquity: number | null = null;
+
+  /** When a failure was last *shown* for a symbol, so a blocked head heartbeats instead of flooding. */
+  private lastFailureAt = new Map<string, number>();
 
   /** When housekeeping last ran, so it runs on its own slow schedule. */
   private lastPrunedAt = 0;
@@ -271,13 +257,23 @@ export class TradingHead {
   }
 
   /**
-   * One full pass over the watchlist.
+   * Run one full pass over the watchlist — or skip.
+   *
+   * Every caller enters through this gate: the timer, an operator's `runNow`,
+   * the chat's `autopilot.runNow` proposal. Passes never overlap because two
+   * heads deciding from the same book at once would both size against the same
+   * headroom — and the second caller is *answered*, not queued.
    *
    * Exported through the service so the API can trigger it and see the result,
    * rather than an operator having to wait out the interval to learn whether
    * their change took.
    */
   async runOnce(): Promise<HeadPassResult> {
+    return this.pass.run(() => this.runPass());
+  }
+
+  /** One pass, entered only while the single-flight gate is held. */
+  private async runPass(): Promise<HeadPassResult> {
     const idle = (reason: string, mode: AutopilotConfig["mode"] | null = null): HeadPassResult => ({
       ran: false,
       mode,
@@ -287,7 +283,7 @@ export class TradingHead {
       outcomes: [],
     });
 
-    const config = await loadAutopilotPolicy();
+    let config = await loadAutopilotPolicy();
     if (!config) return idle("The autopilot policy table is missing; run `prisma db push`.");
     if (!config.enabled) return idle("The trading head is disarmed.", config.mode);
     if (config.symbols.length === 0) return idle("No symbols on the watchlist.", config.mode);
@@ -302,13 +298,37 @@ export class TradingHead {
 
     const exchange = exchangeProvider.fromAccount(bot.exchangeAccount as never);
 
-    const [intel, convictions, positions, book, openedAtPassStart] = await Promise.all([
+    const [intel, convictions, positions, book, openedAtPassStart, accountEquity] = await Promise.all([
       this.desk.gather(config.symbols),
       mirroredConvictions(config.symbols),
       loadOpenPositions(config.botId),
       summariseBook(config.botId),
       openedNotionalToday(),
+      this.readEquity(exchange, config.symbols),
     ]);
+
+    /*
+     * Equity comes from the account, not from a column.
+     *
+     * The policy's `equityQuote` only moves when an operator remembers to move
+     * it — after a loss, a withdrawal or a deposit the head would otherwise
+     * size against a figure the account no longer backs. The live balance can
+     * only *lower* the ceiling (`effectiveEquity` takes the minimum), so this
+     * never widens anything; a balance that cannot be read leaves the
+     * operator's number standing, which is the same answer as every pass
+     * before the account was consulted at all.
+     */
+    const policyCeiling = config.limits.equityQuote;
+    const equityQuote = effectiveEquity(policyCeiling, accountEquity);
+
+    if (accountEquity !== null && accountEquity !== this.lastEquity) {
+      this.lastEquity = accountEquity;
+      logger.info(
+        `[Head] Equity: ${accountEquity.toFixed(2)} free in quote; entry ceiling ${equityQuote} (policy ${policyCeiling})`,
+      );
+    }
+
+    config = { ...config, limits: { ...config.limits, equityQuote } };
 
     // A resting entry that never filled is cancelled before anything else is
     // decided. It holds a position slot and a slice of the day's budget at the
@@ -318,7 +338,11 @@ export class TradingHead {
 
     const outcomes: SymbolOutcome[] = [];
     let executed = 0;
-    let spentToday = openedAtPassStart;
+    // `?? 0` is a fallback, not a claim: null means the journal could not be
+    // read, and `execute` refuses new entries in exactly that state — so the
+    // unknown budget can never fund an entry, while exits (which need no
+    // budget) carry on regardless.
+    let spentToday = openedAtPassStart ?? 0;
 
     // Sequential, not parallel. Each decision changes the exposure the next one
     // is allowed to take, and two symbols sizing against the same headroom at
@@ -433,7 +457,15 @@ export class TradingHead {
     const { symbol, config, exchange, intel, conviction, book } = input;
 
     const now = Date.now();
-    const raw = await exchange.getCandlesticks({ symbol, bar: config.timeframe, limit: candlesNeeded(config) });
+    // Fetch far enough back to cover the position being managed: `peakSince`
+    // can only see what this window holds, and a peak rebuilt from too few
+    // candles reads low — quietly disarming the trail on exactly the old
+    // positions it exists to protect.
+    const raw = await exchange.getCandlesticks({
+      symbol,
+      bar: config.timeframe,
+      limit: candlesNeeded(config, input.position?.openedAt ?? null, now),
+    });
     const candles = toCandles(raw);
 
     if (candles.length === 0) {
@@ -447,6 +479,15 @@ export class TradingHead {
       ? { ...input.position, peakPrice: peakSince(candles, input.position.openedAt, input.position.entryPrice) }
       : null;
 
+    /*
+     * No `arb` on this snapshot, so the council's arbitrage scout (weight 1.5)
+     * reports itself unavailable and is excluded from the tally — the seat is
+     * empty for the head by construction, not by bug. The hybrid strategy wires
+     * cross-venue books into its snapshot; this pass gathers one venue. Wiring
+     * a scan in here is the deliberate next step; until then the docs say the
+     * head votes with its directional seats and its outside readers, not with
+     * the scout.
+     */
     const snapshot: MarketSnapshot = {
       symbol,
       price,
@@ -607,20 +648,26 @@ export class TradingHead {
   ): Promise<{ ok: boolean; smartTradeId: number | null; message: string }> {
     if (isEntry(plan.action)) {
       /*
-       * Every entry leaves a resting take profit behind it.
+       * The journal is the budget, so an unreadable journal has no budget.
        *
-       * The head manages its own exits minute by minute and would close this
-       * at the same net target anyway, so the resting order is not what makes
-       * the profit — it is what makes the position survivable if the daemon
-       * is not there. A filled entry with nothing to sell it is precisely the
-       * stranded-position failure this fork exists to fix, and opening one on
-       * purpose every time the head trades would have been indefensible.
-       *
-       * Priced at the same place the planner takes profit: the target plus the
-       * round trip's fees, so the resting fill clears the same net figure.
-       * Whichever fires first is correct, and `closeSmartTrade` cancels this
-       * one before placing a market exit, so they cannot both sell.
+       * `openedNotionalToday`, the cooldowns and the exit-in-flight guard are
+       * all reads against the autopilot journal; when those reads fail they
+       * used to hand back 0 / null, which reads as "nothing spent today, no
+       * cooldown, no working exit" — three permissions granted by a broken
+       * table. Exits still work: they reduce risk and need no budget. A fresh
+       * commitment of money waits until the journal can record it, and the
+       * health check turns red on the same condition, so a head running this
+       * way is visible as well as restricted.
        */
+      if (!journalStatus().readable) {
+        return {
+          ok: false,
+          smartTradeId: null,
+          message:
+            "Autopilot journal is unreadable; refusing new entries until it can record them (exits are unaffected). Run `prisma db push` if the table is missing.",
+        };
+      }
+
       /*
        * Which exit gets to live at the exchange.
        *
@@ -718,6 +765,46 @@ export class TradingHead {
   }
 
   /**
+   * Free quote-currency balance across the watchlist's quotes, or null.
+   *
+   * Null means "could not be read", which is genuinely different from zero:
+   * the caller falls back to the operator's policy ceiling rather than
+   * refusing every entry on a transient account error. Only the quotes the
+   * watchlist trades are counted, and `availableBalance` rather than the
+   * total: balance already committed to open orders or positions is not
+   * money this loop may spend twice — the exposure caps govern it where it
+   * sits.
+   */
+  private async readEquity(
+    exchange: ReturnType<typeof exchangeProvider.fromAccount>,
+    symbols: string[],
+  ): Promise<number | null> {
+    const quotes = new Set(symbols.map((symbol) => symbol.split("/")[1]).filter(Boolean));
+    if (quotes.size === 0) return null;
+
+    try {
+      const assets = await exchange.accountAssets();
+
+      let total = 0;
+      let seen = false;
+      for (const asset of assets) {
+        if (!quotes.has(asset.currency)) continue;
+        total += asset.availableBalance;
+        seen = true;
+      }
+
+      return seen ? total : null;
+    } catch (error) {
+      // Debug, not warn: this runs every pass, and an account endpoint that is
+      // merely slow is not an incident. The fallback is the policy ceiling.
+      logger.debug(
+        `[Head] Equity unreadable, using the policy ceiling (${error instanceof Error ? error.message : String(error)})`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Put the decision on the dashboard.
    *
    * Trades are always reported — they are rare, they move real money, and every
@@ -734,6 +821,19 @@ export class TradingHead {
     if (plan.action === "hold" && !changed) return;
 
     if (failure) {
+      /*
+       * A failure shows the first time it happens and then heartbeats, the
+       * same deal holds get. A head blocked by the journal gate (or refused
+       * at the door for the same reason every pass) would otherwise write
+       * identical denied bubbles at loop rate — 1,440 a day per symbol — and
+       * bury the feed the way the hold flood did. A *different* failure
+       * changes the plan's fingerprint and reports immediately, as before.
+       */
+      const shownAt = this.lastFailureAt.get(plan.symbol) ?? 0;
+      const shownNow = Date.now();
+      if (!changed && shownNow - shownAt < HOLD_HEARTBEAT_MS) return;
+      this.lastFailureAt.set(plan.symbol, shownNow);
+
       recordAiAction({
         chip: "denied",
         severity: "warning",
@@ -766,19 +866,21 @@ export class TradingHead {
    *
    * Passes never overlap: a slow exchange or a slow model delays the next pass
    * rather than stacking a second one on top of it, because two heads deciding
-   * from the same book at once would both size against the same headroom.
+   * from the same book at once would both size against the same headroom. The
+   * gate lives in `runOnce`, so `runNow` obeys it too.
    */
   start(): void {
     const tick = async () => {
-      if (this.running) {
-        logger.debug("[Head] Previous pass still running; skipping this tick");
-        return;
-      }
-
-      this.running = true;
-
       try {
         const result = await this.runOnce();
+
+        // The gate answered rather than the pass: a slow previous pass is
+        // still deciding, and policy and housekeeping wait for it as they
+        // always did.
+        if (result.reason === PASS_BUSY) {
+          logger.debug("[Head] Previous pass still running; skipping this tick");
+          return;
+        }
 
         if (result.ran && result.executed > 0) {
           logger.info(`[Head] Pass complete: ${result.executed} of ${result.considered} markets acted on`);
@@ -798,9 +900,8 @@ export class TradingHead {
       } catch (error) {
         // A failure here must never take the daemon down. The positions the
         // head holds keep their resting exits, and the next pass tries again.
+        // The single-flight gate releases itself whether this throws or not.
         logger.warn(`[Head] Pass failed: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        this.running = false;
       }
     };
 
@@ -848,7 +949,7 @@ export class TradingHead {
 
   /** What the head is currently holding and reading, for the health view. */
   status() {
-    return { intervalMs: this.intervalMs, running: this.running, intel: this.desk.status() };
+    return { intervalMs: this.intervalMs, running: this.pass.busy(), intel: this.desk.status() };
   }
 }
 

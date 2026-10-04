@@ -18,12 +18,7 @@ import { fileURLToPath } from "node:url";
 import { xprisma } from "@opentrader/db";
 import { exchangeProvider } from "@opentrader/exchanges";
 import type { ExchangeCode } from "@opentrader/types";
-import type {
-  AnalyticsBot,
-  AnalyticsOrder,
-  AnalyticsSmartTrade,
-  AnalyticsTicker,
-} from "./analytics/index.js";
+import type { AnalyticsBot, AnalyticsOrder, AnalyticsSmartTrade, AnalyticsTicker } from "./analytics/index.js";
 import { TickerCache } from "./analytics/index.js";
 
 /**
@@ -418,6 +413,57 @@ export class DashboardService {
       // them as unknown, which is more visible than a log line nobody reads.
     } finally {
       this.dbStatsPending = false;
+    }
+  }
+
+  /**
+   * Exchange accounts, reduced to whether they could actually authenticate.
+   *
+   * The key and secret are read but never returned. This feeds a health check,
+   * and a health report is something people paste into tickets and chat, so it
+   * has to be impossible for a credential to leak through one. Only presence is
+   * reported, which is all the check needs in order to decide anything.
+   */
+  async exchangeAccountsForHealth(): Promise<
+    Array<{
+      id: number;
+      exchangeCode: string;
+      name: string;
+      isDemoAccount: boolean;
+      hasApiKey: boolean;
+      hasSecretKey: boolean;
+      botCount: number;
+    }>
+  > {
+    try {
+      const accounts = await xprisma.exchangeAccount.findMany({
+        select: {
+          id: true,
+          exchangeCode: true,
+          name: true,
+          isDemoAccount: true,
+          apiKey: true,
+          secretKey: true,
+          _count: { select: { bots: true } },
+        },
+      });
+
+      return accounts.map((account) => ({
+        id: account.id,
+        exchangeCode: account.exchangeCode,
+        name: account.name,
+        isDemoAccount: account.isDemoAccount,
+        // Trimmed, because a column holding only spaces is not a credential.
+        // Without this, a wiped key that kept its whitespace reads as configured
+        // and the check passes on an account that cannot trade.
+        hasApiKey: (account.apiKey ?? "").trim().length > 0,
+        hasSecretKey: (account.secretKey ?? "").trim().length > 0,
+        botCount: account._count.bots,
+      }));
+    } catch {
+      // Unknown beats a false all-clear: a failed read leaves the check absent,
+      // which reads as "no data" rather than a confident "everything is fine".
+      return [];
     }
   }
 

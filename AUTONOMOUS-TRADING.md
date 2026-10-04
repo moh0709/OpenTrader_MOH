@@ -70,6 +70,13 @@ the four that already existed:
 | `llm-strategist` | what do the conflicting signals add up to? | 1.5 |
 | `risk-analyst` | should we be trading at all? | advisory, can veto |
 
+The `arbitrage-scout` seat is **empty in the head by construction**: this pass
+gathers one venue, so the snapshot carries no cross-venue scan and the scout
+reports itself unavailable — excluded from the tally rather than counted as
+dissent. The Hybrid strategy wires order books into its snapshot and does vote.
+Wiring a scan into the head's pass is the deliberate next step; until then the
+head trades on its directional seats and its outside readers.
+
 Each of the three new agents reports itself **unavailable** when its evidence is
 missing or stale, and an unavailable agent is excluded from the tally entirely
 rather than counted as a dissenting hold. That is what lets one council serve
@@ -141,14 +148,15 @@ between passes. A peak held in memory is wrong after every restart, and one held
 in a column is another thing to keep consistent with the exchange. It can never
 be below the entry price, so a trail cannot fire on a position that only lost.
 
-**Every entry leaves a resting take profit behind it**, priced at the same net
-target the planner would close at. The head would take that profit itself minute
-by minute, so the resting order is not what earns it — it is what makes the
-position survivable if the daemon is not there. A filled entry with nothing to
-sell it is exactly the stranded-position failure this fork exists to fix, and
-opening one on purpose every time the head traded would have been indefensible.
-`closeSmartTrade` cancels it before placing a market exit, so the two can never
-both sell.
+**Every entry leaves a resting stop loss behind it** — priced just below where
+the loop would act, plus the round trip's fees — and the take profit does not
+rest. On spot, two sell orders against the same coins mean the venue rejects
+the second, so only one exit may live at the exchange, and the choice is made by
+what an outage costs: a position that misses its target waits for the daemon to
+come back, while a position with no floor does not wait at all. The head takes
+profit itself minute by minute in normal operation, and `closeSmartTrade`
+cancels the stop before placing any exit of its own, so the two can never both
+sell.
 
 ---
 
@@ -290,14 +298,21 @@ not run.
 
 All figures from real runs.
 
-**888 tests pass across the monorepo**, up from 799 before this work — 89 new,
-none failing. Two pre-existing `@opentrader/bot` executor tests remain skipped;
-they need a live database and are unrelated.
+**1056 tests pass across the monorepo**, none failing. Two pre-existing
+`@opentrader/bot` executor tests remain skipped; they need a live database and
+are unrelated.
 
 The new coverage: 40 on the position planner (including a property sweep of the
 whole confidence range against a spread of portfolio states, and seven on the
 exit-already-working guard), 17 on the three outside agents, 18 on the
 intelligence sources, 14 on the policy reader and the high-water mark.
+
+Correctness fixes since then added 19 more: the single-flight gate that lets the
+timer and `runNow` share one pass, the journal's fail-closed budget (an
+unreadable journal refuses new entries instead of granting a fresh one), the
+candle window that covers a position's whole life so the trailing exit cannot
+go blind, the live-equity clamp, the entry gate itself, and the health check
+that turns red on exactly that condition.
 
 **Live sources**, run 2026-09-04 against the real endpoints
 (`INTEL_LIVE=1 npx vitest run --root packages/market-intel src/live.test.ts`):
@@ -321,7 +336,7 @@ TradingView live:
   — journalled against its `smartTradeId`.
 - Managing a filled position at three different prices: `hold` at −0.39%,
   `take_profit` at +1.85%, `stop_out` at −3.63%.
-- Every entry carried a `TakeProfitOrder Sell Limit` alongside its market entry.
+- Every entry carried a `TakeProfitOrder Sell Limit` alongside its market entry. *(Historical: entries rest a stop loss since the swap described under "What it can do".)*
 - Two symbols opening in one pass against a 50-quote daily budget spent 36.96
   and then exactly 13.04 — the second sized against what the first had just
   committed, totalling the budget rather than twice it.
@@ -330,15 +345,16 @@ TradingView live:
 
 ### What is not verified
 
-1. **No live money has moved through it.** The opener and closer are the same
-   code paths that have been exercised in production for manual trades, but the
-   head has not itself placed an order at a real exchange.
-2. **The stop is enforced by the loop, not by a resting order.** Every entry
-   leaves a resting take profit, so the upside is covered if the daemon stops —
-   but there is no resting stop-loss, and a position is unprotected on the
-   downside for as long as the head is not running. On a host with the health
-   alerter and fleet guard that window is minutes, and positions are capped at
-   `maxPositionQuote`; it is still the sharpest edge here.
+1. **Live money has moved through it — a little.** The head's first live day
+   booked four round trips: +0.01, −1.84, −1.89, −4.63. Those numbers exposed a
+   0.6:1 reward-to-risk pairing (since corrected to 3.0/2.0 in the shipped
+   defaults), and four trades remain a smoke test rather than a track record:
+   scale still comes from observe mode and the replay harness.
+2. **The stop rests at the exchange; the take profit does not.** This was the
+   other way round when these notes were first written, and the swap is the
+   point: while the daemon is down a position keeps its floor and simply misses
+   its target until it returns. What an outage still costs is *opportunity*,
+   not capital — capital stays capped at `maxPositionQuote` and floor-protected.
 3. **No demonstrated alpha.** The framework decides coherently and is risk-gated;
    whether this agent set makes money is an open question, and the honest answer
    is a month of observe mode on your own markets. The

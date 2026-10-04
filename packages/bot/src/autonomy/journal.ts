@@ -37,6 +37,38 @@ function warnOnce(error: unknown, what: string): void {
   logger.warn(`[Head] ${what} (${error instanceof Error ? error.message : String(error)}). Run \`prisma db push\`.`);
 }
 
+/**
+ * Journal health, by channel.
+ *
+ * The journal is not a log file: it holds the day's opening budget, the
+ * cooldowns and the exit-in-flight guard. A read failure must not present
+ * itself as "zero spent today" - that is how a broken table becomes an open
+ * wallet. Each channel stays bad until an operation on it succeeds again, so
+ * recovery is observed rather than hoped for, and `journalStatus()` lets the
+ * head refuse new entries - and the health check turn red - exactly while the
+ * journal cannot be trusted.
+ */
+let lastReadError: string | null = null;
+let lastWriteError: string | null = null;
+
+export type JournalStatus = {
+  /** False once a read has failed and no read has succeeded since. */
+  readable: boolean;
+  /** False once a write has failed and no write has succeeded since. */
+  writable: boolean;
+  lastReadError: string | null;
+  lastWriteError: string | null;
+};
+
+export function journalStatus(): JournalStatus {
+  return {
+    readable: lastReadError === null,
+    writable: lastWriteError === null,
+    lastReadError,
+    lastWriteError,
+  };
+}
+
 export async function recordDecision(entry: JournalEntry): Promise<number | null> {
   const { plan } = entry;
 
@@ -62,8 +94,10 @@ export async function recordDecision(entry: JournalEntry): Promise<number | null
       },
     })) as { id: number };
 
+    lastWriteError = null;
     return row.id;
   } catch (error) {
+    lastWriteError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not write the autopilot journal");
 
     return null;
@@ -85,8 +119,10 @@ export async function lastActionAt(symbol: string): Promise<number | null> {
       select: { at: true },
     })) as { at: bigint } | null;
 
+    lastReadError = null;
     return row ? Number(row.at) : null;
   } catch (error) {
+    lastReadError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not read the autopilot journal");
 
     return null;
@@ -94,13 +130,18 @@ export async function lastActionAt(symbol: string): Promise<number | null> {
 }
 
 /**
- * Notional opened today by the head.
+ * Notional opened today by the head, or null when it cannot be read.
  *
  * Read from the journal rather than from the trades, because the budget should
  * be spent by the decision to open, not by whether the fill landed — otherwise
  * a run of entries that are still resting would look free.
+ *
+ * Null means *unknown*, and that distinction is the point: returning 0 for an
+ * unreadable table would grant today's budget all over again. The head's entry
+ * gate treats null as "no new entries until this works"; exits need no budget
+ * and are never affected.
  */
-export async function openedNotionalToday(now = Date.now()): Promise<number> {
+export async function openedNotionalToday(now = Date.now()): Promise<number | null> {
   const date = new Date(now);
   const dayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 
@@ -110,11 +151,13 @@ export async function openedNotionalToday(now = Date.now()): Promise<number> {
       select: { sizeQuote: true },
     })) as { sizeQuote: number | null }[];
 
+    lastReadError = null;
     return rows.reduce((total, row) => total + (row.sizeQuote ?? 0), 0);
   } catch (error) {
+    lastReadError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not read the autopilot journal");
 
-    return 0;
+    return null;
   }
 }
 
@@ -139,8 +182,10 @@ export async function lastExitRequest(
       select: { at: true, action: true },
     })) as { at: bigint; action: string } | null;
 
+    lastReadError = null;
     return row ? { at: Number(row.at), action: row.action } : null;
   } catch (error) {
+    lastReadError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not read the autopilot journal");
 
     return null;
@@ -178,6 +223,9 @@ export async function pruneJournal(retentionDays = HOLD_RETENTION_DAYS, now = Da
 
     return result.count;
   } catch (error) {
+    // A failed write marks the channel bad, but a successful prune does not
+    // clear it: deleting rows proves less than creating one does.
+    lastWriteError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not prune the autopilot journal");
 
     return 0;
@@ -209,8 +257,10 @@ export async function recentDecisions(limit = 50, symbol?: string): Promise<Jour
       take: Math.min(500, Math.max(1, limit)),
     })) as (Omit<JournalRow, "at"> & { at: bigint })[];
 
+    lastReadError = null;
     return rows.map((row) => ({ ...row, at: Number(row.at) }));
   } catch (error) {
+    lastReadError = error instanceof Error ? error.message : String(error);
     warnOnce(error, "Could not read the autopilot journal");
 
     return [];

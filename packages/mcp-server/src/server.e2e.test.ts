@@ -43,8 +43,14 @@ beforeAll(async () => {
         auth: req.headers.authorization,
       });
 
+      // The stub answers in the shape of whichever surface was called: tRPC
+      // envelopes, the dashboard routes do not. Returning the tRPC envelope for
+      // both would hide a client that unwraps where it should not.
+      const isTrpc = (req.url ?? "").includes("/api/trpc/");
+      const payload = isTrpc ? { result: { data: { json: { echoed: req.url } } } } : { echoed: req.url };
+
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ result: { data: { json: { echoed: req.url } } } }));
+      res.end(JSON.stringify(payload));
     });
   });
 
@@ -60,6 +66,13 @@ beforeAll(async () => {
         ...(process.env as Record<string, string>),
         OPENTRADER_ADMIN_PASSWORD: "test-secret",
         OPENTRADER_URL: `http://127.0.0.1:${port}`,
+        // Force stdio explicitly. These are scrubbed rather than merely absent:
+        // inheriting a developer's own MCP_HTTP_ENABLED would start the child in
+        // HTTP mode, it would never answer on stdout, and this suite would fail
+        // with a bare 60s hook timeout that points nowhere near the real cause.
+        MCP_HTTP_ENABLED: "",
+        MCP_HTTP_PORT: "",
+        MCP_HTTP_HOST: "",
       },
     }),
   );
@@ -80,16 +93,112 @@ describe.skipIf(!isBuilt)("MCP server over stdio", () => {
         "close_all_deals",
         "close_bot_deals",
         "close_deal",
+        "get_ai_activity",
         "get_bot",
         "get_bot_logs",
+        "get_council_conclusion",
+        "get_council_transcript",
+        "get_health_report",
+        "get_performance",
+        "get_trading_head",
         "list_bots",
         "list_open_deals",
         "open_deal",
+        "run_head_pass",
         "scan_arbitrage",
+        "set_head_mode",
         "start_bot",
         "stop_bot",
       ].sort(),
     );
+  });
+
+  it("marks every read tool read-only and the head-pass runner as acting", async () => {
+    const { tools } = await client.listTools();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+
+    // The reasoning tools must be safe by annotation, not just by convention: an
+    // agent deciding whether it may call something should not have to read prose.
+    for (const name of [
+      "get_trading_head",
+      "get_council_conclusion",
+      "get_council_transcript",
+      "get_ai_activity",
+      "get_health_report",
+      "get_performance",
+    ]) {
+      expect(byName[name].annotations?.readOnlyHint).toBe(true);
+    }
+
+    // Arming the head can start real trading, so it must not claim to be read-only.
+    expect(byName.set_head_mode.annotations?.readOnlyHint).toBe(false);
+    // A live pass places real orders, which is why it is not idempotent.
+    expect(byName.run_head_pass.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it("tells the agent that disarming the head does not close positions", async () => {
+    const { tools } = await client.listTools();
+    const disarm = tools.find((t) => t.name === "set_head_mode")!;
+
+    // This is the single most expensive misreading available to an agent, so the
+    // tool text has to carry it rather than relying on the agent knowing.
+    expect(disarm.description).toMatch(/does NOT close/i);
+  });
+
+  it("reads the council and head state off the REST dashboard surface", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "get_trading_head", arguments: {} });
+    expect(received[0].method).toBe("GET");
+    expect(received[0].url).toContain("/api/dash/autopilot");
+    expect(decodeURIComponent(received[0].url)).toContain("limit=25");
+
+    received.length = 0;
+    await client.callTool({ name: "get_council_conclusion", arguments: {} });
+    expect(received[0].url).toContain("/api/dash/regime");
+
+    received.length = 0;
+    await client.callTool({ name: "get_health_report", arguments: {} });
+    expect(received[0].url).toContain("/api/dash/health");
+  });
+
+  it("passes a symbol to the council transcript", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "get_council_transcript", arguments: { symbol: "BTC/USDT" } });
+
+    expect(received[0].url).toContain("/api/dash/regime/transcript");
+    // A slash in a symbol must stay encoded, or it splits the path.
+    expect(received[0].url).toContain("symbol=BTC%2FUSDT");
+  });
+
+  it("defaults the AI activity cursor to zero rather than a timestamp", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "get_ai_activity", arguments: {} });
+
+    // The cursor is a sequence number; sending a timestamp here silently returns
+    // nothing, which reads to an agent exactly like "the AI did nothing".
+    expect(decodeURIComponent(received[0].url)).toContain("since=0");
+  });
+
+  it("defaults arming the head to observe, never straight to live", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "set_head_mode", arguments: { armed: true } });
+
+    expect(received[0].method).toBe("POST");
+    expect(received[0].url).toBe("/api/dash/actions/autopilot.arm");
+    expect(JSON.parse(received[0].body)).toEqual({ mode: "observe" });
+  });
+
+  it("disarms to a different route than it arms", async () => {
+    received.length = 0;
+
+    await client.callTool({ name: "set_head_mode", arguments: { armed: false } });
+
+    expect(received[0].url).toBe("/api/dash/actions/autopilot.disarm");
+    expect(JSON.parse(received[0].body)).toEqual({});
   });
 
   it("marks the closing tools as destructive so an agent treats them carefully", async () => {

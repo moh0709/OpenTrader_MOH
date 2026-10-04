@@ -63,6 +63,24 @@ export const DEFAULT_AUTOPILOT: AutopilotConfig = {
   limits: DEFAULT_HEAD_LIMITS,
 };
 
+/**
+ * The equity ceiling actually in force this pass.
+ *
+ * The policy's `equityQuote` is the operator's stated capital basis; the live
+ * balance is what the account can really fund. They answer different questions,
+ * and the safe answer is the smaller one: this may only ever *lower* the
+ * ceiling, never raise it, so the reduce-or-refuse invariant holds even if a
+ * balance endpoint returns something absurd. A balance that could not be read
+ * is not zero — it is unknown, and unknown leaves the operator's number alone,
+ * which is exactly the behaviour of every pass before the account was
+ * consulted at all.
+ */
+export function effectiveEquity(policyEquity: number, accountEquity: number | null): number {
+  if (accountEquity === null || !Number.isFinite(accountEquity) || accountEquity < 0) return policyEquity;
+
+  return Math.min(policyEquity, accountEquity);
+}
+
 type PolicyRow = {
   enabled: boolean;
   mode: string;

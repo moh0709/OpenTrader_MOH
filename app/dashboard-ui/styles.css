@@ -755,6 +755,14 @@ body:has(.ticker:not([hidden])) .grid { padding-bottom: calc(var(--ticker-h) + 1
 body:has(.ticker:not([hidden])) .toasts { bottom: calc(var(--ticker-h) + 16px); }
 body:has(.ticker:not([hidden])) .toasts--alerts { bottom: auto; }
 
+/* The ticker sits at z-index 90, above the drawer's 70, so it painted across
+   the bottom 40px of every drawer panel. Nothing in the panel is told to yield,
+   so whatever landed there — on the AI settings form, the Save and Disable
+   buttons at the very end of it — simply stopped receiving clicks while looking
+   entirely normal. The panel stops short of the bar instead, which is what the
+   two rules above already do for the grid and the toasts. */
+body:has(.ticker:not([hidden])) .drawer__panel { bottom: var(--ticker-h); }
+
 /* Below this the two lanes are each too narrow to finish a sentence, so the
    trade lane takes the whole bar back. The AI lane's content is not lost - the
    action window on the AI tab is the full record. */

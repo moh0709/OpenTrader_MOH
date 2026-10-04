@@ -15,8 +15,11 @@ FROM base AS skeleton
 # Copy entire repository and scaffold
 COPY . .
 
-# Copy the minimum of files necessary for installing dependencies
-RUN moon docker scaffold cli
+# Copy the minimum of files necessary for installing dependencies.
+# mcp-server is scaffolded explicitly: it is not in the cli's dependency closure
+# (the daemon only reads its bundle off disk at runtime), so without naming it
+# here its sources would be missing from the build stage entirely.
+RUN moon docker scaffold cli mcp-server
 
 #### BUILD
 FROM base AS build
@@ -36,7 +39,10 @@ RUN moon docker setup
 COPY --from=skeleton /app/.moon/docker/sources .
 
 # Build something (optional)
-RUN moon run cli:build
+# The MCP server is built here, not only in dev: the daemon serves its bundle as
+# a download from /api/dash/mcp/download, and a container image that never built
+# it would serve a 503 on the button the main page offers.
+RUN moon run cli:build mcp-server:build
 
 # Remove unneeded files and folders
 RUN moon docker prune
@@ -47,6 +53,10 @@ WORKDIR /app
 
 COPY --from=build /app/app ./app
 COPY --from=build /app/node_modules ./node_modules
+
+# The MCP server bundle the dashboard offers as a download. Copied whole so the
+# daemon's bundle lookup finds it beside the running code.
+COPY --from=build /app/packages/mcp-server ./packages/mcp-server
 
 # Copy Prisma schema, migrations, and seed script
 COPY --from=build /app/packages/prisma/src/schema.prisma ./packages/prisma/src/schema.prisma

@@ -3,6 +3,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { configFromEnv, query } from "./client.js";
 import { createServer } from "./server.js";
+import { serveHttp } from "./http.js";
 
 /**
  * stdio entry point.
@@ -38,11 +39,37 @@ async function probe(config: ReturnType<typeof configFromEnv>) {
   }
 }
 
+/**
+ * Should this process serve HTTP instead of stdio?
+ *
+ * Opt-in by environment variable or flag, never inferred. A process that serves
+ * a socket has a materially larger blast radius than one that speaks over its
+ * own pipes, so the safe mode has to be the one you get by doing nothing.
+ */
+function wantsHttp(env: NodeJS.ProcessEnv, argv: string[]): boolean {
+  if (argv.includes("--http")) return true;
+  const flag = env.MCP_HTTP_ENABLED?.toLowerCase();
+
+  return flag === "true" || flag === "1" || flag === "yes";
+}
+
 async function main() {
   const config = configFromEnv();
-  const server = createServer(config);
 
   await probe(config);
+
+  if (wantsHttp(process.env, process.argv.slice(2))) {
+    // Loopback unless told otherwise. This serves tools that can close real
+    // positions, so reaching it from the open internet must be a decision made
+    // in a config file, not a consequence of running the command.
+    const host = process.env.MCP_HTTP_HOST ?? "127.0.0.1";
+    const port = Number(process.env.MCP_HTTP_PORT) || 8931;
+
+    await serveHttp({ port, host, config });
+    return;
+  }
+
+  const server = createServer(config);
   await server.connect(new StdioServerTransport());
 
   process.stderr.write("[opentrader-mcp] ready\n");

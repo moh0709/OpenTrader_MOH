@@ -13,7 +13,7 @@ caused a real problem.
 exchange account, trades one symbol, and decides its own entries and exits by its
 strategy. Bots are autonomous — you do not need to drive them.
 
-**Deals** (called *smart trades* in the API) are individual positions. A deal has
+**Deals** (called _smart trades_ in the API) are individual positions. A deal has
 an **entry order** and usually a **take-profit order**. When the entry fills you
 are holding inventory; when the take profit fills the deal is finished.
 
@@ -22,14 +22,14 @@ not need your help to trade.
 
 ### Two lanes, and the difference matters
 
-| | Strategy lane | Manual lane |
-|---|---|---|
-| Who opens | The bot, by its own rules | You, via `open_deal` |
-| Who exits | The bot's strategy | **Nobody, unless you set a take profit** |
-| Deal `ref` | Set by the strategy | Starts with `manual:` |
-| Counts against manual budget | No | Yes |
+|                              | Strategy lane             | Manual lane                              |
+| ---------------------------- | ------------------------- | ---------------------------------------- |
+| Who opens                    | The bot, by its own rules | You, via `open_deal`                     |
+| Who exits                    | The bot's strategy        | **Nobody, unless you set a take profit** |
+| Deal `ref`                   | Set by the strategy       | Starts with `manual:`                    |
+| Counts against manual budget | No                        | Yes                                      |
 
-A deal you open is *attached* to a bot (it borrows that bot's exchange account and
+A deal you open is _attached_ to a bot (it borrows that bot's exchange account and
 symbol) but is **not managed by that bot's strategy**. The strategy only ever
 touches deals it created itself. This has one consequence you must not forget:
 
@@ -40,24 +40,53 @@ touches deals it created itself. This has one consequence you must not forget:
 
 ## 2. Connecting
 
-Two equivalent routes. Prefer MCP if it is available to you.
+Two transports. **Pick by what the client can reach.**
 
-**MCP (stdio).** Tools are listed in section 4. Configuration:
+| Client                                   | Transport                 | Works on a phone? |
+| ---------------------------------------- | ------------------------- | ----------------- |
+| Claude Desktop, Hermes, Codex            | stdio (a spawned process) | No                |
+| ChatGPT web/desktop, ChatGPT iOS/Android | Streamable HTTP (a URL)   | **Yes**           |
+
+A phone cannot open a pipe to a process on a server in another country, so the
+mobile apps — and ChatGPT itself — only accept a remote URL. Both transports are
+the _same_ server and the same tools; only the connection differs.
+
+### Streamable HTTP — for ChatGPT and the mobile apps
+
+Start the daemon's endpoint:
+
+```bash
+MCP_HTTP_ENABLED=true MCP_HTTP_HOST=127.0.0.1 MCP_HTTP_PORT=8931 \
+  node packages/mcp-server/dist/cli.mjs
+```
+
+Then point the client at `https://your-host/mcp` and authenticate with your admin
+password as a bearer token. Two requirements that are easy to miss:
+
+- **It must be HTTPS.** ChatGPT refuses a plain-HTTP endpoint. Terminate TLS at a
+  reverse proxy and forward to the loopback port.
+- **It must be reachable from the internet.** A `127.0.0.1` or LAN address works
+  from your laptop and nowhere else.
+
+### stdio — for desktop clients
 
 ```json
 {
   "mcpServers": {
     "opentrader": {
       "command": "node",
-      "args": ["/root/.hermes/opentrader/packages/mcp-server/dist/cli.mjs"],
+      "args": ["/absolute/path/to/opentrader-mcp.mjs"],
       "env": {
         "OPENTRADER_ADMIN_PASSWORD": "<admin password>",
-        "OPENTRADER_URL": "http://[::1]:8000"
+        "OPENTRADER_URL": "https://your-host"
       }
     }
   }
 }
 ```
+
+The main page's **MCP** button offers the download and prints the exact snippet
+for each client, so you do not have to assemble it from these docs.
 
 **REST (tRPC over HTTP).** Base URL `https://ai.omniware.dk/api/trpc`.
 Authentication is the admin password in an `Authorization` header — no `Bearer`
@@ -101,7 +130,7 @@ These are not suggestions. Each one prevents a specific, expensive mistake.
    doing it, and do not close several deals to "clean up".
 
 4. **Stopping a bot does not close its positions.** `stop_bot` stops the bot from
-   *deciding*; everything it already holds stays on the exchange. To exit
+   _deciding_; everything it already holds stays on the exchange. To exit
    positions you must close them.
 
 5. **A refusal is an answer.** If a request is refused for exceeding a limit, do
@@ -122,13 +151,19 @@ These are not suggestions. Each one prevents a specific, expensive mistake.
 
 ### Reading — always safe
 
-| Tool | REST | Input | Returns |
-|---|---|---|---|
-| `list_bots` | `bot.list` | – | Every bot: id, name, template, symbol, enabled |
-| `get_bot` | `bot.getOne` | `botId` (bare number) | One bot's full configuration |
-| `list_open_deals` | `bot.openSmartTrades` | `{botId}` | That bot's open deals, with `smartTradeId` |
-| `get_bot_logs` | `bot.getBotLogs` | `{botId, limit, cursor:null}` | Recent log lines |
-| `scan_arbitrage` | `arbitrage.scan` | `{symbol, tradeQty, venues?}` | Cross-venue spreads, costed |
+| Tool                     | REST                              | Input                         | Returns                                                              |
+| ------------------------ | --------------------------------- | ----------------------------- | -------------------------------------------------------------------- |
+| `list_bots`              | `bot.list`                        | –                             | Every bot: id, name, template, symbol, enabled                       |
+| `get_bot`                | `bot.getOne`                      | `botId` (bare number)         | One bot's full configuration                                         |
+| `list_open_deals`        | `bot.openSmartTrades`             | `{botId}`                     | That bot's open deals, with `smartTradeId`                           |
+| `get_bot_logs`           | `bot.getBotLogs`                  | `{botId, limit, cursor:null}` | Recent log lines                                                     |
+| `scan_arbitrage`         | `arbitrage.scan`                  | `{symbol, tradeQty, venues?}` | Cross-venue spreads, costed                                          |
+| `get_trading_head`       | `GET /api/dash/autopilot`         | `{limit?}`                    | The head's mode, limits, positions and recent decisions with reasons |
+| `get_council_conclusion` | `GET /api/dash/regime`            | –                             | Research convictions per symbol and the caps they hold bots at       |
+| `get_council_transcript` | `GET /api/dash/regime/transcript` | `{symbol}`                    | The analyst reports and debate behind one conviction                 |
+| `get_ai_activity`        | `GET /api/dash/ai/actions`        | `{since, session?, limit?}`   | Every AI action: council calls, orders, risk blocks                  |
+| `get_health_report`      | `GET /api/dash/health`            | –                             | Health checks with an ok/warn/crit rollup                            |
+| `get_performance`        | `GET /api/dash/snapshot`          | `{botId?, metric?}`           | Realised P&L net of fees, win rate, leaderboard                      |
 
 **Reading `scan_arbitrage`.** Each route reports two spreads. `topOfBookSpreadBps`
 is the naive number; `netSpreadBps` is what survives walking real depth to your
@@ -138,25 +173,60 @@ positive at the top of book and none were profitable after costs. If nothing is
 executable, say so plainly; do not present the top-of-book figure as an
 opportunity. `executable: 0` is the normal, correct answer on liquid pairs.
 
+**Reading `get_ai_activity`.** The cursor is a **sequence number, not a
+timestamp**. Pass `since: 0` on the first call, then pass back the `cursor` from
+the response. Passing a timestamp returns nothing at all, which reads exactly
+like "the AI did nothing this hour". The buffer is in-memory: `restarted: true`
+means your session is stale and the record was lost across a daemon restart, not
+that nothing happened.
+
+**Reading `get_trading_head`.** Most minutes end in `hold`, so a short decision
+list is normal and is not evidence of a fault. Before concluding the desk is idle,
+read the `head` block and `get_health_report` — stale market data, a refused
+entry, a capital cap and an unreadable journal all look like a quiet market from
+the outside.
+
+**Reading `get_performance`.** Figures are **net of fees**, so a strategy that
+only clears its costs by a basis point does not look like one that clears them
+comfortably. Two limits worth stating out loud: open positions carry unrealised
+P&L that is _excluded_, so read the positions before calling a book flat or
+winning; and a handful of round trips is not an edge.
+
 ### Bot lifecycle — reversible
 
-| Tool | REST | Input | Effect |
-|---|---|---|---|
-| `start_bot` | `bot.start` | `{botId}` | Bot resumes evaluating its strategy |
-| `stop_bot` | `bot.stop` | `{botId}` | Bot stops evaluating. **Positions stay open.** |
+| Tool        | REST        | Input     | Effect                                         |
+| ----------- | ----------- | --------- | ---------------------------------------------- |
+| `start_bot` | `bot.start` | `{botId}` | Bot resumes evaluating its strategy            |
+| `stop_bot`  | `bot.stop`  | `{botId}` | Bot stops evaluating. **Positions stay open.** |
+
+### The trading head — its own lane
+
+| Tool            | REST                                                | Input            | Effect                                            |
+| --------------- | --------------------------------------------------- | ---------------- | ------------------------------------------------- |
+| `set_head_mode` | `POST /api/dash/actions/autopilot.arm` \| `.disarm` | `{armed, mode?}` | Switches the autonomous head on/off, observe/live |
+| `run_head_pass` | `POST /api/dash/actions/autopilot.runNow`           | –                | One pass now instead of at the next interval      |
+
+- `mode` is `"observe"` (the default when arming) or `"live"`. Observe plans and
+  journals without placing anything. **Only `live` trades real money.**
+- **Disarming does not close positions.** Same trap as `stop_bot`: it stops the
+  head deciding, and everything it holds stays on the exchange unmanaged. To exit,
+  use `close_bot_deals`.
+- `run_head_pass` is **not a dry run**. On a live head the pass places real
+  orders. Cooldown and minimum-hold rules still apply, so "not allowed to act yet"
+  is a correct and common answer — report it, do not retry to force a trade.
 
 ### Closing — real orders, irreversible
 
-| Tool | REST | Input |
-|---|---|---|
-| `close_deal` | `smartTrade.close` | `{smartTradeId, mode?}` |
-| `close_bot_deals` | `smartTrade.closeBotTrades` | `{botId, mode?}` |
-| `close_all_deals` | `smartTrade.closeAll` | `{confirm: true, mode?}` |
+| Tool              | REST                        | Input                    |
+| ----------------- | --------------------------- | ------------------------ |
+| `close_deal`      | `smartTrade.close`          | `{smartTradeId, mode?}`  |
+| `close_bot_deals` | `smartTrade.closeBotTrades` | `{botId, mode?}`         |
+| `close_all_deals` | `smartTrade.closeAll`       | `{confirm: true, mode?}` |
 
 `mode` is `"market"` (default) or `"limit"`.
 
 - **`market`** — cancels the resting exit and sells now. Guaranteed exit, taker
-  fee. Use this whenever the point is to be *out*.
+  fee. Use this whenever the point is to be _out_.
 - **`limit`** — rests the exit on the passive side of the book. Cheaper, but
   **may never fill**. Only when there is no urgency.
 
@@ -166,17 +236,17 @@ delaying an urgent exit over.
 
 What closing does, decided from the order state:
 
-| Situation | Result | Outcome |
-|---|---|---|
-| Entry not filled | Cancels resting orders. **Never sells** — nothing was held | `canceled_unfilled` |
-| Entry filled, exit resting | Cancels the exit, sells at market | `closed` |
-| Entry filled, no exit order | Creates an exit and places it | `closed` |
-| Already closed | Nothing. Safe to call twice | `already_closed` |
+| Situation                   | Result                                                     | Outcome             |
+| --------------------------- | ---------------------------------------------------------- | ------------------- |
+| Entry not filled            | Cancels resting orders. **Never sells** — nothing was held | `canceled_unfilled` |
+| Entry filled, exit resting  | Cancels the exit, sells at market                          | `closed`            |
+| Entry filled, no exit order | Creates an exit and places it                              | `closed`            |
+| Already closed              | Nothing. Safe to call twice                                | `already_closed`    |
 
 ### Opening — real orders, irreversible
 
-| Tool | REST | Input |
-|---|---|---|
+| Tool        | REST              | Input                                                                                 |
+| ----------- | ----------------- | ------------------------------------------------------------------------------------- |
 | `open_deal` | `smartTrade.open` | `{botId, side, quantity｜quoteAmount, orderType?, price?, takeProfitPrice?, symbol?}` |
 
 - `botId` — supplies the exchange account and default symbol
@@ -189,12 +259,12 @@ What closing does, decided from the order state:
 
 Hard limits, enforced before anything reaches the exchange. You cannot widen them:
 
-| Limit | Default |
-|---|---|
-| Per-order notional | 100 quote |
-| Concurrent manual positions | 5 |
-| Daily manual notional | 1000 quote |
-| Symbol allowlist | unrestricted |
+| Limit                       | Default      |
+| --------------------------- | ------------ |
+| Per-order notional          | 100 quote    |
+| Concurrent manual positions | 5            |
+| Daily manual notional       | 1000 quote   |
+| Symbol allowlist            | unrestricted |
 
 **It refuses rather than resizes.** An over-limit request returns `ok: false`
 with the reasons; nothing is opened.
@@ -204,12 +274,15 @@ with the reasons; nothing is opened.
 ## 5. Recipes
 
 **Report on the desk**
+
 ```
 list_bots → for each enabled bot: list_open_deals
 ```
+
 Summarise: how many bots, how many open positions, which symbols. Do not act.
 
 **Close one deal the user named**
+
 ```
 list_open_deals(botId)        → confirm the deal exists, note entry price
                               → tell the user the likely P&L at current price
@@ -218,25 +291,31 @@ list_open_deals(botId)        → verify it is gone
 ```
 
 **Exit a whole strategy**
+
 ```
 close_bot_deals(botId)   → exits the positions
 stop_bot(botId)          → stops it opening new ones
 ```
+
 Both are needed. Either alone leaves the job half done. Note that
 `close_bot_deals` also closes any manual deals attached to that bot.
 
 **Open a position the user asked for**
+
 ```
 open_deal({botId, side, quoteAmount, takeProfitPrice})
 ```
+
 Include `takeProfitPrice` unless the user explicitly wants to manage the exit
 themselves. Report the deal id and the filled size.
 
 **Explain why a bot is not trading**
+
 ```
 get_bot(botId) → is it enabled?
 get_bot_logs(botId) → what is the strategy saying?
 ```
+
 A bot that is disabled after a restart is normal (see Traps).
 
 ---
@@ -265,7 +344,7 @@ trade shortly after. Check the deal again rather than closing it a second time.
 **`already_closed` means the work was already done.** Not an error. Do not retry.
 
 **Cancelling is not closing.** If you see any tool or endpoint described as
-cancelling a trade, it cancels resting *orders*. On a filled entry that leaves the
+cancelling a trade, it cancels resting _orders_. On a filled entry that leaves the
 position open and unmanaged — worse than doing nothing.
 
 **Deal IDs are not bot IDs.** `close_deal` takes a `smartTradeId` from
@@ -302,5 +381,8 @@ Know these so you do not misreport what the system can do.
   opportunities across venues, but execution goes through a single venue.
 - **Manual position sizing is long-only in effect.** Exit quantity equals entry
   quantity; partial fills are not modelled.
-- **Opening has not yet been exercised on a live exchange.** Closing has (deal
-  #649, filled, −$4.23 realised). Treat the first live open as a test.
+- **Opening has been exercised live, but only by the trading head and only
+  briefly.** Its first live day booked four round trips (+0.01, −1.84, −1.89,
+  −4.63); the manual lane goes through the same opener. Closing has also been
+  exercised (deal #649, filled, −$4.23 realised). Treat small live opens as
+  tests until the observe-mode record says otherwise.
