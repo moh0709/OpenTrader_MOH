@@ -444,7 +444,16 @@ export class DashboardService {
           isDemoAccount: true,
           apiKey: true,
           secretKey: true,
-          _count: { select: { bots: true } },
+          // `primaryBots`, NOT `bots`. The Bot model names its foreign key
+          // relation "exchangeAccount" with no @relation name, which Prisma maps
+          // to `primaryBots` here; `bots` is the separate "AdditionalExchangeAccounts"
+          // relation. Counting the wrong one returns 0 on every install and the
+          // check silently disappears - which is the failure this check exists to
+          // prevent, so it is worth the comment.
+          //
+          // Both are counted: a bot naming this account as an additional account
+          // still places orders through it and still needs it to work.
+          _count: { select: { primaryBots: true, bots: true } },
         },
       });
 
@@ -458,7 +467,7 @@ export class DashboardService {
         // and the check passes on an account that cannot trade.
         hasApiKey: (account.apiKey ?? "").trim().length > 0,
         hasSecretKey: (account.secretKey ?? "").trim().length > 0,
-        botCount: account._count.bots,
+        botCount: account._count.primaryBots + account._count.bots,
       }));
     } catch {
       // Unknown beats a false all-clear: a failed read leaves the check absent,
