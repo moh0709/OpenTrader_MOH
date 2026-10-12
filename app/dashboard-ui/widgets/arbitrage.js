@@ -133,6 +133,18 @@ export const arbitrageScannerWidget = {
   },
 };
 
+/**
+ * How often this widget refreshes.
+ *
+ * The dashboard's shared poller runs every five seconds, which is right for
+ * positions and events — and wrong here. A cross-venue scan takes seconds
+ * against seven exchanges, so keying it to the snapshot meant a new scan started
+ * every five seconds while the previous one was still running, piling up
+ * requests nobody was waiting for. Prices across venues move far slower than a
+ * position's P&L, so this keeps its own, much slower cadence.
+ */
+const REFRESH_MS = 30_000;
+
 export const arbitrageVenuesWidget = {
   id: "arbitrageVenues",
   name: "Venue prices",
@@ -154,13 +166,25 @@ export const arbitrageVenuesWidget = {
   },
 
   render(ctx) {
+    let timer = null;
+    let controller = null;
+
     const load = async () => {
+      // Abort the previous request if one is still open, so switching symbol
+      // quickly cannot leave a stale scan to land on top of the new one.
+      controller?.abort();
+      controller = new AbortController();
+      const signal = controller.signal;
+
       const symbol = ctx.config.symbol || "BTC/USDT";
 
       try {
-        const scan = await query("arbitrage.scan", { symbol });
+        const scan = await query("arbitrage.scan", { symbol }, { signal });
+        if (signal.aborted) return;
         draw(scan);
       } catch (error) {
+        // An aborted request is this widget's own doing, not a failure to report.
+        if (signal.aborted || error.name === "AbortError") return;
         mount(ctx.body, emptyState(`Could not read prices: ${error.message}`));
       }
     };
@@ -208,8 +232,14 @@ export const arbitrageVenuesWidget = {
     };
 
     void load();
+    timer = window.setInterval(() => void load(), REFRESH_MS);
 
-    return { dispose: ctx.store.subscribe((reason) => reason === "snapshot" && void load()) };
+    return {
+      dispose: () => {
+        if (timer !== null) window.clearInterval(timer);
+        controller?.abort();
+      },
+    };
   },
 };
 
