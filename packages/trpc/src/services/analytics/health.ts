@@ -147,6 +147,8 @@ export type HealthInput = {
     name: string;
     /** Demo/sandbox accounts trade without keys, so they are never in fault. */
     isDemoAccount: boolean;
+    /** Paper accounts are simulated locally and never reach a venue. */
+    isPaperAccount: boolean;
     hasApiKey: boolean;
     hasSecretKey: boolean;
     botCount: number;
@@ -389,7 +391,9 @@ export function runHealthChecks(input: HealthInput): HealthReport {
   // This is the check that would have caught it. It is `crit`, not `warn`,
   // because a live account with no key cannot trade: that is not degraded, it is
   // a desk that is down while appearing to run.
-  const credentialed = input.exchangeAccounts.filter((account) => !account.isDemoAccount);
+  const credentialed = input.exchangeAccounts.filter(
+    (account) => !account.isDemoAccount && !account.isPaperAccount,
+  );
   // Every account something actually trades on, demo included. A demo-only
   // install must still get the check and read `ok`: an absent check is ambiguous
   // between "nothing to fault" and "could not read the accounts", and this is
@@ -397,7 +401,14 @@ export function runHealthChecks(input: HealthInput): HealthReport {
   const inUse = input.exchangeAccounts.filter((account) => account.botCount > 0);
   // Only a live account can be in fault — a demo account trades with no key by
   // design, so a missing one there is not a missing credential.
-  const unusable = inUse.filter((account) => !account.isDemoAccount && (!account.hasApiKey || !account.hasSecretKey));
+  // A paper account is matched by the local simulator and never contacts the
+  // venue, so it has no key to be missing - exactly like the demo case above.
+  // Counting it as unusable put the whole fleet in crit, every hour, over a
+  // credential that would do nothing if it were there.
+  const unusable = inUse.filter(
+    (account) =>
+      !account.isDemoAccount && !account.isPaperAccount && (!account.hasApiKey || !account.hasSecretKey),
+  );
 
   if (inUse.length > 0) {
     checks.push({

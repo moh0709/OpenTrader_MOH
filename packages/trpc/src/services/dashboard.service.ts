@@ -430,6 +430,7 @@ export class DashboardService {
       exchangeCode: string;
       name: string;
       isDemoAccount: boolean;
+      isPaperAccount: boolean;
       hasApiKey: boolean;
       hasSecretKey: boolean;
       botCount: number;
@@ -442,6 +443,7 @@ export class DashboardService {
           exchangeCode: true,
           name: true,
           isDemoAccount: true,
+          isPaperAccount: true,
           apiKey: true,
           secretKey: true,
           // `primaryBots`, NOT `bots`. The Bot model names its foreign key
@@ -462,6 +464,7 @@ export class DashboardService {
         exchangeCode: account.exchangeCode,
         name: account.name,
         isDemoAccount: account.isDemoAccount,
+        isPaperAccount: account.isPaperAccount,
         // Trimmed, because a column holding only spaces is not a credential.
         // Without this, a wiped key that kept its whitespace reads as configured
         // and the check passes on an account that cannot trade.

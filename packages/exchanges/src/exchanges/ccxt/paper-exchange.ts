@@ -97,6 +97,14 @@ export class PaperExchange extends CCXTExchange {
            * reason it is not a limit. A protective sell on a long triggers on
            * the way down and fills at the bid; a buy stop lifts the ask.
            */
+          // The list this walks is a snapshot. Confirm the row is still open
+          // before filling it, so no stale entry can resurrect a cancelled
+          // order the way a cancelled stop once did.
+          if (!(await this.stillOpen(order.id))) {
+            this.openOrders = this.openOrders.filter((open) => open.id !== order.id);
+            continue;
+          }
+
           if (order.stopPrice !== null && order.stopPrice !== undefined) {
             const last = (ticker.last ?? ticker.bid ?? ticker.ask) as number | undefined;
             if (last === undefined) continue;
@@ -194,6 +202,13 @@ export class PaperExchange extends CCXTExchange {
   emitOrder(order: PaperOrder) {
     this.resolve([order]);
     this.ordersStatusChanged = new Promise((resolve) => (this.resolve = resolve));
+  }
+
+  /** Whether this order is still fillable, read fresh rather than from the snapshot. */
+  private async stillOpen(id: number): Promise<boolean> {
+    const row = await xprisma.paperOrder.findUnique({ where: { id }, select: { status: true } });
+
+    return row?.status === "open" || row?.status === "partially_filled";
   }
 
   /**
@@ -439,6 +454,22 @@ export class PaperExchange extends CCXTExchange {
         status: "canceled" satisfies OrderStatus,
       },
     });
+
+    /*
+     * Take it out of the matcher's list as well as the table.
+     *
+     * `openOrders` is an in-memory copy refreshed only when an order is placed.
+     * Cancelling wrote "canceled" to the row and left the order sitting in that
+     * array, so the matcher went on comparing it against the ticker and filled
+     * it anyway - writing "filled" straight over the cancellation.
+     *
+     * It cost real money. Closing a position cancels its resting stop and sells
+     * at market; the stop stayed live in here, the price kept falling through
+     * it, and three head positions were sold a second time they no longer
+     * owned - 279.77 of inventory that did not exist, and the loss on each one
+     * booked twice.
+     */
+    this.openOrders = this.openOrders.filter((open) => open.id !== order.id);
     this.emitOrder(order);
 
     return {

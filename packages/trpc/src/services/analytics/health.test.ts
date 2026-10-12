@@ -50,6 +50,7 @@ function makeInput(overrides: Partial<HealthInput> = {}): HealthInput {
         exchangeCode: "OKX",
         name: "MOH OKX",
         isDemoAccount: false,
+        isPaperAccount: false,
         hasApiKey: true,
         hasSecretKey: true,
         botCount: 1,
@@ -67,6 +68,7 @@ const account = (over: Partial<HealthInput["exchangeAccounts"][number]> = {}) =>
   exchangeCode: "OKX",
   name: "MOH OKX",
   isDemoAccount: false,
+  isPaperAccount: false,
   hasApiKey: true,
   hasSecretKey: true,
   botCount: 1,
@@ -364,6 +366,25 @@ describe("runHealthChecks", () => {
 
     expect(find(quiet, "bots.stalled").detail).toContain("run only when one of their own trades completes");
     expect(find(quiet, "bots.stalled").detail).toContain("bots.capital");
+  });
+
+  it("does not call a paper account unusable for having no API key", () => {
+    // The live fleet is two paper accounts with empty key columns. Paper orders
+    // are matched locally and never reach a venue, so there is no credential to
+    // be missing - and calling it crit put the whole install in crit hourly.
+    const paper = runHealthChecks(
+      makeInput({ exchangeAccounts: [account({ isPaperAccount: true, hasApiKey: false, hasSecretKey: false })] }),
+    );
+
+    expect(find(paper, "exchange.credentials").status).toBe("ok");
+  });
+
+  it("still flags a live account with no API key", () => {
+    const live = runHealthChecks(
+      makeInput({ exchangeAccounts: [account({ hasApiKey: false, hasSecretKey: false })] }),
+    );
+
+    expect(find(live, "exchange.credentials").status).toBe("crit");
   });
 
   it("flags a stuck processing flag", () => {
