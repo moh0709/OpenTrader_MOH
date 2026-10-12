@@ -1,4 +1,11 @@
-import { DEFAULT_ARBITRAGE_CONFIG, evaluatePair, type ArbEvaluation, type VenueQuote } from "@opentrader/arbitrage";
+import {
+  DEFAULT_ARBITRAGE_CONFIG,
+  DEFAULT_VENUE_TIMEOUT_MS,
+  evaluatePair,
+  type ArbEvaluation,
+  type VenueQuote,
+  withTimeout,
+} from "@opentrader/arbitrage";
 import { exchangeProvider } from "@opentrader/exchanges";
 import { ExchangeCode } from "@opentrader/types";
 import type { Context } from "../../../../utils/context.js";
@@ -35,20 +42,109 @@ export type ArbitrageScanResult = {
 };
 
 /**
+ * How long a completed scan stays reusable, and how long a venue may take.
+ *
+ * The TTL is deliberately shorter than the engine's own staleness limit
+ * (`maxBookAgeMs`, 5s) is long, which sounds contradictory but is the point: a
+ * served scan carries the timestamps of the books it was built from, so the
+ * evaluation still rejects anything stale. What the cache removes is the round
+ * trip to seven exchanges, not the freshness check.
+ */
+const CACHE_TTL_MS = 15_000;
+
+const cache = new Map<string, { at: number; result: ArbitrageScanResult }>();
+
+/**
+ * One in-flight scan per key.
+ *
+ * Without this, two widgets asking for the same market in the same tick each
+ * start their own seven-venue sweep, and the second one's exchange calls buy
+ * nothing. The map holds the promise rather than the result, so a caller that
+ * arrives mid-scan waits on the work already underway instead of duplicating it.
+ */
+const inFlight = new Map<string, Promise<ArbitrageScanResult>>();
+
+function keyFor(input: TArbitrageScanInputSchema, venues: ExchangeCode[]): string {
+  return JSON.stringify([
+    input.symbol,
+    input.tradeQty,
+    input.minNetSpreadBps,
+    input.takerFeeBps,
+    venues.join(","),
+  ]);
+}
+
+/** Drop expired entries so the map does not grow with every symbol ever scanned. */
+function sweep() {
+  const cutoff = Date.now() - CACHE_TTL_MS;
+  for (const [key, entry] of cache) {
+    if (entry.at < cutoff) cache.delete(key);
+  }
+}
+
+/**
  * Scan every venue pair for a real, costed arbitrage opportunity.
  *
- * A venue that fails is dropped from the scan rather than failing the sweep —
- * one dead exchange must never blind the scan to the others.
+ * A venue that fails — or that simply never answers — is dropped from the scan
+ * rather than failing the sweep, so one dead exchange must never blind the scan
+ * to the others. The timeout is what makes "never answers" mean something: the
+ * exchange layer will wait 30s for a socket that is merely stalled, and a page
+ * waiting on that reads as broken.
  */
 export async function scanArbitrage({ input }: Options): Promise<ArbitrageScanResult> {
   const { symbol, tradeQty, minNetSpreadBps, takerFeeBps } = input;
   const codes = (input.venues?.length ? input.venues : Object.values(ExchangeCode)) as ExchangeCode[];
+  const timeoutMs = Number(process.env.ARBITRAGE_VENUE_TIMEOUT_MS) || DEFAULT_VENUE_TIMEOUT_MS;
+
+  const key = keyFor(input, codes);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.result;
+
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+
+  const run = scanVenues({ codes, symbol, tradeQty, minNetSpreadBps, takerFeeBps, timeoutMs });
+
+  inFlight.set(key, run);
+
+  try {
+    const result = await run;
+    sweep();
+    cache.set(key, { at: Date.now(), result });
+
+    return result;
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+async function scanVenues({
+  codes,
+  symbol,
+  tradeQty,
+  minNetSpreadBps,
+  takerFeeBps,
+  timeoutMs,
+}: {
+  codes: ExchangeCode[];
+  symbol: string;
+  tradeQty: number;
+  minNetSpreadBps: number;
+  takerFeeBps: number;
+  timeoutMs: number;
+}): Promise<ArbitrageScanResult> {
   const now = Date.now();
 
   const settled = await Promise.allSettled(
     codes.map(async (code) => {
       const exchange = exchangeProvider.fromCode(code, false);
-      return { code, book: await exchange.getOrderbook(symbol) };
+      const book = await withTimeout(
+        exchange.getOrderbook(symbol),
+        timeoutMs,
+        `did not answer within ${timeoutMs}ms`,
+      );
+
+      return { code, book };
     }),
   );
 

@@ -1,5 +1,6 @@
 import type { IOrderbook } from "@opentrader/types";
 import { evaluatePair } from "./spread.js";
+import { DEFAULT_VENUE_TIMEOUT_MS, withTimeout } from "./timeout.js";
 import type { ArbEvaluation, ArbitrageConfig, VenueQuote } from "./types.js";
 
 /**
@@ -37,10 +38,15 @@ export async function collectQuotes(
   sources: OrderbookSource[],
   symbol: string,
   config: ArbitrageConfig,
+  timeoutMs: number = DEFAULT_VENUE_TIMEOUT_MS,
 ): Promise<{ quotes: VenueQuote[]; failures: { venue: string; error: string }[] }> {
   const settled = await Promise.allSettled(
     sources.map(async (source) => {
-      const book = await source.getOrderbook(symbol);
+      const book = await withTimeout(
+        source.getOrderbook(symbol),
+        timeoutMs,
+        `did not answer within ${timeoutMs}ms`,
+      );
       return { source, book };
     }),
   );
@@ -83,9 +89,10 @@ export async function scanSymbol(
   sources: OrderbookSource[],
   symbol: string,
   config: ArbitrageConfig,
+  timeoutMs: number = DEFAULT_VENUE_TIMEOUT_MS,
   now: number = Date.now(),
 ): Promise<ScanResult> {
-  const { quotes, failures } = await collectQuotes(sources, symbol, config);
+  const { quotes, failures } = await collectQuotes(sources, symbol, config, timeoutMs);
 
   const evaluations: ArbEvaluation[] = [];
   for (let i = 0; i < quotes.length; i++) {
